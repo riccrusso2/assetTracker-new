@@ -1,7 +1,7 @@
 {
-  "version": 1,
-  "exportedAt": "2026-03-18T17:17:25.883Z",
-  "totalCash": 9450,
+  "version": 3,
+  "exportedAt": "2026-06-10T06:52:52.060Z",
+  "totalCash": 10150,
   "assets": [
     {
       "id": "ftseallworld",
@@ -9,9 +9,9 @@
       "identifier": "IE00BK5BQT80",
       "quantity": 94.164474,
       "costBasis": 135.54,
-      "targetWeight": 57,
-      "lastPrice": 146.86,
-      "lastUpdated": "2026-03-18T17:15:24.266Z",
+      "targetWeight": 51,
+      "lastPrice": 159.23,
+      "lastUpdated": "2026-06-10T06:52:47.205Z",
       "assetClass": "ETF",
       "currency": "EUR"
     },
@@ -19,11 +19,11 @@
       "id": "swda",
       "name": "iShares Core MSCI World (Acc)",
       "identifier": "IE00B4L5Y983",
-      "quantity": 3,
-      "costBasis": 113.786191,
-      "targetWeight": 3,
-      "lastPrice": 111.74,
-      "lastUpdated": "2026-03-18T17:15:24.205Z",
+      "quantity": 32,
+      "costBasis": 115.44511,
+      "targetWeight": 14,
+      "lastPrice": 120.8,
+      "lastUpdated": "2026-06-10T06:52:47.213Z",
       "assetClass": "ETF",
       "currency": "EUR"
     },
@@ -31,11 +31,11 @@
       "id": "msciemimi",
       "name": "iShares MSCI EM IMI",
       "identifier": "IE00BKM4GZ66",
-      "quantity": 27,
-      "costBasis": 42.2041,
-      "targetWeight": 5,
-      "lastPrice": 41.35,
-      "lastUpdated": "2026-03-18T17:15:24.386Z",
+      "quantity": 44,
+      "costBasis": 43.224327,
+      "targetWeight": 7,
+      "lastPrice": 46.08,
+      "lastUpdated": "2026-06-10T06:52:47.214Z",
       "assetClass": "ETF",
       "currency": "EUR"
     },
@@ -43,11 +43,11 @@
       "id": "worldquality",
       "name": "iShares MSCI World Quality Factor (Acc)",
       "identifier": "IE00BP3QZ601",
-      "quantity": 23,
-      "costBasis": 68.020433,
-      "targetWeight": 7,
-      "lastPrice": 68.96,
-      "lastUpdated": "2026-03-18T17:15:24.224Z",
+      "quantity": 31,
+      "costBasis": 68.822253,
+      "targetWeight": 8,
+      "lastPrice": 73.79,
+      "lastUpdated": "2026-06-10T06:52:47.213Z",
       "assetClass": "ETF",
       "currency": "EUR",
       "chartLabel": "MSCI Quality"
@@ -56,11 +56,11 @@
       "id": "worldmomentum",
       "name": "iShares MSCI World Momentum Factor (Acc)",
       "identifier": "IE00BP3QZ825",
-      "quantity": 19,
-      "costBasis": 83.685259,
-      "targetWeight": 7,
-      "lastPrice": 83.9,
-      "lastUpdated": "2026-03-18T17:15:24.419Z",
+      "quantity": 24,
+      "costBasis": 84.631242,
+      "targetWeight": 8,
+      "lastPrice": 98.41,
+      "lastUpdated": "2026-06-10T06:52:47.231Z",
       "assetClass": "ETF",
       "currency": "EUR",
       "chartLabel": "MSCI Momentum"
@@ -69,49 +69,25 @@
       "id": "worldvalue",
       "name": "iShares MSCI World Value Factor (Acc)",
       "identifier": "IE00BP3QZB59",
-      "quantity": 28,
-      "costBasis": 50.865352,
-      "targetWeight": 7,
-      "lastPrice": 55.36,
-      "lastUpdated": "2026-03-18T17:15:24.419Z",
+      "quantity": 36,
+      "costBasis": 52.510551,
+      "targetWeight": 8,
+      "lastPrice": 67.17,
+      "lastUpdated": "2026-06-10T06:52:47.287Z",
       "assetClass": "ETF",
       "currency": "EUR",
       "chartLabel": "MSCI Value"
     },
     {
-      "id": "gold",
-      "name": "Physical Gold USD (Acc)",
-      "identifier": "IE00B4ND3602",
-      "quantity": 28.114722,
-      "costBasis": 59.19,
-      "targetWeight": 10,
-      "lastPrice": 82.09,
-      "lastUpdated": "2026-03-18T17:15:24.223Z",
-      "assetClass": "Commodity",
-      "currency": "EUR"
-    },
-    {
       "id": "bitcoin",
       "name": "Bitcoin ETP",
       "identifier": "XS2940466316",
-      "quantity": 124,
-      "costBasis": 7.31836,
+      "quantity": 212,
+      "costBasis": 6.643176,
       "targetWeight": 4,
-      "lastPrice": 6.18,
-      "lastUpdated": "2026-03-18T17:15:24.419Z",
+      "lastPrice": 5.31,
+      "lastUpdated": "2026-06-10T06:52:47.214Z",
       "assetClass": "Crypto",
-      "currency": "EUR"
-    },
-    {
-      "id": "quantum",
-      "name": "VanEck Quantum Computing UCITS ETF",
-      "identifier": "IE0007Y8Y157",
-      "quantity": 16.127685,
-      "costBasis": 21.01,
-      "targetWeight": 0,
-      "lastPrice": 20.55,
-      "lastUpdated": "2026-03-18T17:15:24.419Z",
-      "assetClass": "ETF",
       "currency": "EUR"
     }
   ],
@@ -195,32 +171,48 @@
       "fee": 24
     },
     {
-      "id": "e5s3hv4a",
+      "id": "4lqn95p0",
       "name": "Crusoe",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "h7vr1ejl",
+      "name": "Strand",
+      "invested": 300,
+      "fee": 24,
+      "abbonamento": 468
+    },
+    {
+      "id": "h9speqna",
+      "name": "Bolt",
       "invested": 300,
       "fee": 24
     }
   ],
-  "pe": [
-    {
-      "id": "eqt-nexus",
-      "name": "EQT Nexus ELTIF",
-      "identifier": "LU3176111881",
-      "costBasis": 500,
-      "lastPrice": 523,
-      "targetWeight": 0,
-      "assetClass": "Private Equity",
-      "manual": true
-    },
-    {
-      "id": "apollo-global",
-      "name": "Apollo Global Private Markets ELTIF",
-      "identifier": "LU3170240538",
-      "costBasis": 500,
-      "lastPrice": 508,
-      "targetWeight": 0,
-      "assetClass": "Private Equity",
-      "manual": true
-    }
-  ]
+  "assetClasses": [
+    "ETF",
+    "Azione",
+    "Commodity",
+    "Crypto",
+    "Bond",
+    "Altro"
+  ],
+  "goldEtf": {
+    "id": "gold-etf",
+    "name": "Physical Gold USD (Acc)",
+    "identifier": "IE00B4ND3602",
+    "quantity": 33.385282,
+    "costBasis": 62.27,
+    "lastPrice": 71.82,
+    "lastUpdated": "2026-06-10T06:52:47.380Z",
+    "targetWeight": 10,
+    "assetClass": "Oro",
+    "manual": false
+  },
+  "physGold": {
+    "grams": 55.93,
+    "pricePerGram18kt": 87.97,
+    "lastUpdated": "2026-06-10T06:49:40Z"
+  }
 }

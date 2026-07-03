@@ -1,0 +1,262 @@
+[
+  {
+    "label": "Feb 2026",
+    "month": 2,
+    "year": 2026,
+    "totalValue": 43284.53,
+    "assets": [
+      {
+        "id": "ftseallworld",
+        "name": "FTSE All-World USD",
+        "price": 146.59,
+        "quantity": 94.164474,
+        "value": 13803.57
+      },
+      {
+        "id": "swda",
+        "name": "iShares Core MSCI World (Acc)",
+        "price": 111.78,
+        "quantity": 3,
+        "value": 335.34
+      },
+      {
+        "id": "msciemimi",
+        "name": "iShares MSCI EM IMI",
+        "price": 40.64,
+        "quantity": 27,
+        "value": 1097.28
+      },
+      {
+        "id": "worldquality",
+        "name": "iShares MSCI World Quality Factor (Acc)",
+        "price": 69.25,
+        "quantity": 23,
+        "value": 1592.75
+      },
+      {
+        "id": "worldmomentum",
+        "name": "iShares MSCI World Momentum Factor (Acc)",
+        "price": 82.65,
+        "quantity": 19,
+        "value": 1570.35
+      },
+      {
+        "id": "worldvalue",
+        "name": "iShares MSCI World Value Factor (Acc)",
+        "price": 54.69,
+        "quantity": 28,
+        "value": 1531.32
+      },
+      {
+        "id": "gold-etf",
+        "name": "Physical Gold USD (Acc)",
+        "price": 85.64,
+        "quantity": 27.524299,
+        "value": 2357.18
+      },
+      {
+        "id": "bitcoin",
+        "name": "Bitcoin ETP",
+        "price": 6.29,
+        "quantity": 124,
+        "value": 779.96
+      }
+    ],
+    "savedAt": "2026-05-06T15:21:07.194Z"
+  },
+  {
+    "label": "Mar 2026",
+    "month": 3,
+    "year": 2026,
+    "totalValue": 44658.1,
+    "assets": [
+      {
+        "id": "ftseallworld",
+        "name": "FTSE All-World USD",
+        "price": 141.01,
+        "quantity": 94.164474,
+        "value": 13278.13
+      },
+      {
+        "id": "swda",
+        "name": "iShares Core MSCI World (Acc)",
+        "price": 107.54,
+        "quantity": 10,
+        "value": 1075.4
+      },
+      {
+        "id": "msciemimi",
+        "name": "iShares MSCI EM IMI",
+        "price": 39.17,
+        "quantity": 30,
+        "value": 1175.1
+      },
+      {
+        "id": "worldquality",
+        "name": "iShares MSCI World Quality Factor (Acc)",
+        "price": 66.63,
+        "quantity": 25,
+        "value": 1665.75
+      },
+      {
+        "id": "worldmomentum",
+        "name": "iShares MSCI World Momentum Factor (Acc)",
+        "price": 78.75,
+        "quantity": 21,
+        "value": 1653.75
+      },
+      {
+        "id": "worldvalue",
+        "name": "iShares MSCI World Value Factor (Acc)",
+        "price": 53.32,
+        "quantity": 31,
+        "value": 1652.92
+      },
+      {
+        "id": "gold-etf",
+        "name": "Physical Gold USD (Acc)",
+        "price": 76.53,
+        "quantity": 28.114722,
+        "value": 2151.62
+      },
+      {
+        "id": "bitcoin",
+        "name": "Bitcoin ETP",
+        "price": 5.85,
+        "quantity": 149,
+        "value": 871.65
+      }
+    ],
+    "savedAt": "2026-05-06T15:21:07.440Z"
+  },
+  {
+    "label": "Apr 2026",
+    "month": 4,
+    "year": 2026,
+    "totalValue": 48077.24,
+    "assets": [
+      {
+        "id": "ftseallworld",
+        "name": "FTSE All-World USD",
+        "price": 151.61,
+        "quantity": 94.164474,
+        "value": 14276.28
+      },
+      {
+        "id": "swda",
+        "name": "iShares Core MSCI World (Acc)",
+        "price": 115.23,
+        "quantity": 17,
+        "value": 1958.91
+      },
+      {
+        "id": "msciemimi",
+        "name": "iShares MSCI EM IMI",
+        "price": 43.47,
+        "quantity": 32,
+        "value": 1391.04
+      },
+      {
+        "id": "worldquality",
+        "name": "iShares MSCI World Quality Factor (Acc)",
+        "price": 70.8,
+        "quantity": 27,
+        "value": 1911.6
+      },
+      {
+        "id": "worldmomentum",
+        "name": "iShares MSCI World Momentum Factor (Acc)",
+        "price": 89.42,
+        "quantity": 22,
+        "value": 1967.24
+      },
+      {
+        "id": "worldvalue",
+        "name": "iShares MSCI World Value Factor (Acc)",
+        "price": 56.89,
+        "quantity": 33,
+        "value": 1877.37
+      },
+      {
+        "id": "gold-etf",
+        "name": "Physical Gold USD (Acc)",
+        "price": 79.25,
+        "quantity": 32.530568,
+        "value": 2578.05
+      },
+      {
+        "id": "bitcoin",
+        "name": "Bitcoin ETP",
+        "price": 6.33,
+        "quantity": 172,
+        "value": 1088.76
+      }
+    ],
+    "savedAt": "2026-05-06T15:21:07.669Z"
+  },
+  {
+    "label": "Mag 2026",
+    "month": 5,
+    "year": 2026,
+    "totalValue": 50728.14,
+    "assets": [
+      {
+        "id": "ftseallworld",
+        "name": "FTSE All-World USD",
+        "price": 157.99,
+        "quantity": 94.164474,
+        "value": 14877.05
+      },
+      {
+        "id": "swda",
+        "name": "iShares Core MSCI World (Acc)",
+        "price": 119.61,
+        "quantity": 26,
+        "value": 3109.86
+      },
+      {
+        "id": "msciemimi",
+        "name": "iShares MSCI EM IMI",
+        "price": 46.67,
+        "quantity": 40,
+        "value": 1866.8
+      },
+      {
+        "id": "worldquality",
+        "name": "iShares MSCI World Quality Factor (Acc)",
+        "price": 72.61,
+        "quantity": 28,
+        "value": 2033.08
+      },
+      {
+        "id": "worldmomentum",
+        "name": "iShares MSCI World Momentum Factor (Acc)",
+        "price": 95.63,
+        "quantity": 23,
+        "value": 2199.49
+      },
+      {
+        "id": "worldvalue",
+        "name": "iShares MSCI World Value Factor (Acc)",
+        "price": 62.38,
+        "quantity": 35,
+        "value": 2183.3
+      },
+      {
+        "id": "bitcoin",
+        "name": "Bitcoin ETP",
+        "price": 6.93,
+        "quantity": 172,
+        "value": 1191.96
+      },
+      {
+        "id": "gold-etf",
+        "name": "Physical Gold USD (Acc)",
+        "price": 77.63,
+        "quantity": 33.309451,
+        "value": 2585.81
+      }
+    ],
+    "savedAt": "2026-05-06T15:21:12.471Z"
+  }
+]

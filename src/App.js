@@ -16,6 +16,9 @@ import {
   Settings, Tag,
 } from "lucide-react";
 import "./styles.css";
+import {
+  r2, isTotalTargetAsset, calcRebalancingTwoLevel, calcGrowthAttribution,
+} from "./rebalance";
 
 // ====================== CONSTANTS ======================
 const STORAGE_KEYS = {
@@ -62,8 +65,6 @@ const PHYS_GOLD_DEFAULT = {
 };
 
 // ====================== UTILITIES ======================
-const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
-
 const fmt = (n, compact = false) => {
   if (n == null || Number.isNaN(n)) return "—";
   try {
@@ -212,15 +213,6 @@ const calcTotals = (assets, goldEtf) => {
   return { val, cost, ret, best, worst };
 };
 
-const calcWeights = (assets, totalVal) => {
-  const tv = totalVal || 0;
-  return assets.map((a) => {
-    const value  = a.lastPrice ? a.lastPrice * (a.quantity || 0) : 0;
-    const weight = tv > 0 ? (value / tv) * 100 : 0;
-    return { id: a.id, name: a.name, value, weight, target: a.targetWeight || 0 };
-  });
-};
-
 const calcClassDist = (assets) => {
   const map = {};
   for (const a of assets) {
@@ -228,15 +220,6 @@ const calcClassDist = (assets) => {
     if (v > 0) map[a.assetClass] = (map[a.assetClass] || 0) + v;
   }
   return Object.entries(map).map(([name, value]) => ({ name, value: r2(value) }));
-};
-
-const calcDrift = (assets, totalVal) => {
-  if (!totalVal) return 0;
-  return assets.reduce((acc, a) => {
-    const v = (a.lastPrice || 0) * (a.quantity || 0);
-    const actual = (v / totalVal) * 100;
-    return acc + Math.abs(actual - (a.targetWeight || 0));
-  }, 0);
 };
 
 const calcProjectionScenarios = (start, monthly, baseReturn, years) => {
@@ -255,100 +238,6 @@ const calcProjectionScenarios = (start, monthly, baseReturn, years) => {
     }
   }
   return data;
-};
-
-const calcRebalancing = (assets, totalVal, budget) => {
-  if (!totalVal || totalVal <= 0) return { actions: [] };
-  const sumTarget = assets.reduce((acc, a) => acc + (a.targetWeight || 0), 0) || 1;
-  const norm = 100 / sumTarget;
-  const actions = assets.map((a) => {
-    const cur   = (a.lastPrice || 0) * (a.quantity || 0);
-    const curW  = (cur / totalVal) * 100;
-    const tgtW  = (a.targetWeight || 0) * norm;
-    const delta = (tgtW / 100) * totalVal - cur;
-    const qty   = a.lastPrice ? delta / a.lastPrice : 0;
-    return { ...a, curW, tgtW, delta, qty };
-  });
-  const buy = new Array(actions.length).fill(0);
-  let eligible = actions.map((_, i) => i).filter((i) => actions[i].delta > 0);
-  let remaining = budget;
-  for (let iter = 0; iter < 20 && eligible.length > 0 && remaining > 0.005; iter++) {
-    const sumEligTgt = eligible.reduce((acc, i) => acc + actions[i].tgtW, 0);
-    if (sumEligTgt <= 0) break;
-    const nextEligible = [];
-    let allocated = 0;
-    for (const i of eligible) {
-      const proportional = (actions[i].tgtW / sumEligTgt) * remaining;
-      const room         = actions[i].delta - buy[i];
-      if (proportional >= room) { buy[i] = actions[i].delta; allocated += room; }
-      else { buy[i] += proportional; allocated += proportional; nextEligible.push(i); }
-    }
-    remaining -= allocated;
-    eligible   = nextEligible;
-  }
-  if (remaining > 0.005) {
-    const sumAllTgt = actions.reduce((acc, a) => acc + a.tgtW, 0);
-    if (sumAllTgt > 0) actions.forEach((a, i) => { buy[i] += (a.tgtW / sumAllTgt) * remaining; });
-  }
-  const rawBuys = actions.map((_, i) => Math.max(0, buy[i] || 0));
-  const rounded = rawBuys.map(r2);
-  const roundDiff = r2(budget - rounded.reduce((a, b) => a + b, 0));
-  if (Math.abs(roundDiff) > 0) { const maxIdx = rounded.indexOf(Math.max(...rounded)); rounded[maxIdx] = r2(rounded[maxIdx] + roundDiff); }
-  return {
-    actions: actions.map((a, i) => ({
-      ...a, monthlyBuy: rounded[i],
-      monthlyQty: a.lastPrice && rounded[i] > 0 ? r2(rounded[i] / a.lastPrice) : 0,
-    })),
-  };
-};
-
-// Two-level rebalancing:
-// Livello 1 — divide il budget tra Oro (ETF + fisico) e ETF quotati
-// Il peso attuale dell'oro include sia l'ETF oro che l'oro fisico.
-// Il budget oro viene però allocato solo sull'ETF oro (l'oro fisico è illiquido).
-// Livello 2 — distribuisce il budget ETF tra i singoli asset (mai vendere)
-//
-// grandTotal = portafoglio intero (ETF + oro fisico + cash + startup) — denominatore oro
-// liquidVal  = solo asset quotati incluso ETF oro (totals.val)        — denominatore ETF
-const calcRebalancingTwoLevel = (etfAssets, goldEtf, physGoldValue, grandTotal, liquidVal, budget) => {
-  const goldTargetPct = goldEtf?.targetWeight || 0;
-
-  const goldEtfVal = (goldEtf?.lastPrice && goldEtf?.quantity)
-    ? r2(goldEtf.lastPrice * goldEtf.quantity) : 0;
-
-  // Oro TOTALE = ETF oro + oro fisico (per calcolo peso attuale sull'intero portafoglio)
-  const goldTotalVal = r2(goldEtfVal + (physGoldValue || 0));
-
-  // Peso oro calcolato sul PORTAFOGLIO INTERO (grandTotal)
-  const goldCurrentPct = grandTotal > 0
-    ? r2((goldTotalVal / grandTotal) * 100) : 0;
-
-  // Sotto-portafoglio ETF = asset quotati (liquidVal) meno l'ETF oro
-  // Corrisponde ai pesi mostrati nella tabella ETF & Asset
-  const etfTotalVal = r2(liquidVal - goldEtfVal);
-
-  // Budget oro: quanto manca per portare l'oro al target sull'intero portafoglio
-  // dopo il versamento del budget. "Buy only" — non si vende mai.
-  let goldBudget = 0;
-  let goldQty = 0;
-  if (goldTargetPct > 0 && goldEtf?.lastPrice) {
-    const newTotal   = grandTotal + budget;
-    const goldNeeded = r2((goldTargetPct / 100) * newTotal - goldTotalVal);
-    if (goldNeeded > 0) {
-      goldBudget = r2(Math.min(goldNeeded, budget));
-      goldQty    = goldEtf.lastPrice > 0 ? r2(goldBudget / goldEtf.lastPrice) : 0;
-    }
-  }
-  const etfBudget = r2(budget - goldBudget);
-
-  const etfRebalance = calcRebalancing(etfAssets, etfTotalVal, etfBudget);
-
-  return {
-    goldBudget, goldQty,
-    goldCurrentPct, goldTargetPct,
-    goldEtfVal, physGoldValue: physGoldValue || 0, goldTotalVal,
-    etfBudget, etfTotalVal, etfRebalance,
-  };
 };
 
 const exportCSV = (assets) => {
@@ -511,6 +400,7 @@ const AssetModal = ({ asset, assetClasses, onSave, onClose }) => {
       quantity:     parseFloat(form.quantity)     || 0,
       costBasis:    parseFloat(form.costBasis)    || 0,
       targetWeight: parseFloat(form.targetWeight) || 0,
+      targetOnTotal: form.targetOnTotal ?? form.assetClass === "Crypto",
       lastPrice:    form.lastPrice ?? null,
       lastUpdated:  form.lastUpdated ?? null,
     });
@@ -544,8 +434,15 @@ const AssetModal = ({ asset, assetClasses, onSave, onClose }) => {
               {assetClasses.map((c) => <option key={c}>{c}</option>)}
             </select>
           </label>
+          <label className="field-label" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <input type="checkbox" style={{ width: "auto" }}
+              checked={form.targetOnTotal ?? form.assetClass === "Crypto"}
+              onChange={(e) => set("targetOnTotal", e.target.checked)}/>
+            Target in % del patrimonio totale (come l'oro)
+          </label>
           <p className="hint-text" style={{ marginTop: 0 }}>
             Se inserisci un ISIN valido, il prezzo sarà aggiornato automaticamente via JustETF.
+            {" "}Con la spunta attiva, il peso target è calcolato sull'intero patrimonio (liquidità, ETF, startup, oro) invece che sul solo sotto-portafoglio ETF — utile per Bitcoin.
           </p>
         </div>
         <div className="modal-footer">
@@ -850,6 +747,30 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  // ---- Config: il server è la fonte di verità ----
+  // Al mount carica data/config.json; localStorage resta cache di fallback
+  // (es. server irraggiungibile). Niente più import/export manuale.
+  const [configLoaded, setConfigLoaded] = useState(false);
+  const [lastSaved,    setLastSaved]    = useState(null);
+
+  useEffect(() => {
+    fetch("/api/config")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((cfg) => {
+        if (cfg && Array.isArray(cfg.assets)) {
+          setAssets(cfg.assets);
+          if (Array.isArray(cfg.startups))       setSU(cfg.startups);
+          if (typeof cfg.totalCash === "number") setCash(cfg.totalCash);
+          if (Array.isArray(cfg.assetClasses))   setAC(cfg.assetClasses);
+          if (cfg.goldEtf)  setGoldEtf(cfg.goldEtf);
+          if (cfg.physGold) setPhysGold(cfg.physGold);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setConfigLoaded(true));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ---- Gold spot price fetch ----
   // Calls /api/gold-price which proxies gold-api.com XAU/EUR
   // Backend returns: { spotEurPerTroyOz, spotEurPerGram, price18ktPerGram, updatedAt }
@@ -913,9 +834,16 @@ const refreshGoldPrices = useCallback(async () => {
 }, [fetchOne, fetchGoldSpotPrice]);
 
   // ---- Derived ----
-const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
+  const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
   const assetTotals = useMemo(() => calcTotals(assets, null), [assets]);
-  const weights   = useMemo(() => calcWeights(assets, assetTotals.val), [assets, assetTotals.val]);
+
+  // Split: asset con target sul patrimonio totale (es. Bitcoin) vs ETF classici
+  const etfAssets = useMemo(() => assets.filter((a) => !isTotalTargetAsset(a)), [assets]);
+  const totalTargetAssets = useMemo(() => assets.filter(isTotalTargetAsset), [assets]);
+  const etfSubTotal = useMemo(
+    () => etfAssets.reduce((s, a) => s + (a.lastPrice || 0) * (a.quantity || 0), 0),
+    [etfAssets]);
+
   const classDist = useMemo(() => calcClassDist(assets), [assets]);
   const goldEtfValue = useMemo(() =>
     (goldEtf.lastPrice && goldEtf.quantity) ? r2(goldEtf.lastPrice * goldEtf.quantity) : 0,
@@ -935,9 +863,6 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
       : 0,
     [goldEtf]
   );
-
-  const combinedTotals = totals;
-
 
   // Physical gold: value only (no cost basis, no performance)
   const physGoldValue = useMemo(() =>
@@ -960,23 +885,46 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
   }, [classDist, suTotal, goldTotal, totalCash]);
 
   // Drift a due livelli:
-  // - ETF: peso effettivo vs sotto-portafoglio ETF (assetTotals.val, senza oro ETF)
-  // - Oro: peso effettivo (ETF + fisico) vs grandTotal (intero patrimonio)
+  // - ETF: peso effettivo vs sotto-portafoglio ETF (senza oro né asset a target totale)
+  // - Oro / Bitcoin: peso effettivo vs grandTotal (intero patrimonio)
   const drift = useMemo(() => {
-    const etfDrift = assets.reduce((acc, a) => {
+    const etfDrift = etfAssets.reduce((acc, a) => {
       const v = (a.lastPrice || 0) * (a.quantity || 0);
-      const actual = assetTotals.val > 0 ? (v / assetTotals.val) * 100 : 0;
+      const actual = etfSubTotal > 0 ? (v / etfSubTotal) * 100 : 0;
       return acc + Math.abs(actual - (a.targetWeight || 0));
     }, 0);
     const goldActual = grandTotal > 0 ? ((goldEtfValue + physGoldValue) / grandTotal) * 100 : 0;
     const goldDrift  = goldEtf.identifier ? Math.abs(goldActual - (goldEtf.targetWeight || 0)) : 0;
-    return etfDrift + goldDrift;
-  }, [assets, assetTotals.val, goldEtfValue, physGoldValue, grandTotal, goldEtf]);
+    const ttDrift = totalTargetAssets.reduce((acc, a) => {
+      const v = (a.lastPrice || 0) * (a.quantity || 0);
+      const actual = grandTotal > 0 ? (v / grandTotal) * 100 : 0;
+      return acc + Math.abs(actual - (a.targetWeight || 0));
+    }, 0);
+    return etfDrift + goldDrift + ttDrift;
+  }, [etfAssets, totalTargetAssets, etfSubTotal, goldEtfValue, physGoldValue, grandTotal, goldEtf]);
 
-  const rebalanceTwoLevel = useMemo(
-      () => calcRebalancingTwoLevel(assets, goldEtf, physGoldValue, grandTotal, totals.val, monthBudget),
-      [assets, goldEtf, physGoldValue, grandTotal, totals.val, monthBudget]
-    );
+  // Livello 1: oro (ETF + fisico) + asset a target totale (Bitcoin, …)
+  const rebalanceTwoLevel = useMemo(() => {
+    const items = [];
+    if (goldEtf.identifier && goldEtf.lastPrice) {
+      items.push({
+        id: goldEtf.id, name: goldEtf.name, kind: "gold",
+        targetPct: goldEtf.targetWeight || 0,
+        currentVal: goldEtfValue + physGoldValue,
+        price: goldEtf.lastPrice,
+      });
+    }
+    totalTargetAssets.forEach((a) => {
+      if (!a.lastPrice) return;
+      items.push({
+        id: a.id, name: a.name, kind: "asset",
+        targetPct: a.targetWeight || 0,
+        currentVal: a.lastPrice * (a.quantity || 0),
+        price: a.lastPrice,
+      });
+    });
+    return calcRebalancingTwoLevel(etfAssets, items, grandTotal, etfSubTotal, monthBudget);
+  }, [etfAssets, totalTargetAssets, goldEtf, goldEtfValue, physGoldValue, grandTotal, etfSubTotal, monthBudget]);
 
   const projData = useMemo(() => calcProjectionScenarios(grandTotal, projMonthly, projReturn, projYears),
     [grandTotal, projMonthly, projReturn, projYears]);
@@ -1003,6 +951,12 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
 
   const { data: snapshotChartData, assetIds } = useMemo(() => buildChartData(snapshots), [snapshots]);
 
+  const growthAttribution = useMemo(() => calcGrowthAttribution(snapshots), [snapshots]);
+  const growthTotals = useMemo(() => ({
+    contrib: r2(growthAttribution.reduce((a, x) => a + x.contrib, 0)),
+    market:  r2(growthAttribution.reduce((a, x) => a + x.market, 0)),
+  }), [growthAttribution]);
+
   const assetNameMap = useMemo(() => {
   const m = {};
   assets.forEach((a) => {
@@ -1015,33 +969,6 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
 
   return m;
 }, [assets, goldEtf]);
-
-  const perfBarData = useMemo(() => {
-  const base = assets.filter((a) => a.lastPrice && a.costBasis);
-
-  if (goldEtf.lastPrice && goldEtf.costBasis) {
-    base.push(goldEtf);
-  }
-
-  return base
-    .map((a) => ({
-      name: a.name.split(" ").slice(0, 3).join(" "),
-      value: r2(((a.lastPrice - a.costBasis) / a.costBasis) * 100),
-    }))
-    .sort((a, b) => b.value - a.value);
-}, [assets, goldEtf]);
-
-  const weightBarData = useMemo(() => {
-  const baseWeights = calcWeights(assets, assetTotals.val);
-
-  return baseWeights
-    .map((w) => ({
-      name: w.name.split(" ").slice(0, 3).join(" "),
-      current: r2(w.weight),
-      target: w.target,
-    }))
-    .filter((w) => w.target > 0 || w.current > 0.5);
-}, [assets, assetTotals.val]);
 
   const filteredAssets = useMemo(() =>
     search.trim()
@@ -1098,7 +1025,7 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
   }, []);
 
   // ---- Snapshot ----
-  const saveMonthlySnapshot = useCallback(async () => {
+  const buildSnapshot = useCallback(() => {
     const now = new Date();
     const month = now.getMonth() + 1;
     const year  = now.getFullYear();
@@ -1107,7 +1034,7 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
       ? [{ id: goldEtf.id, name: goldEtf.name, price: goldEtf.lastPrice,
           quantity: goldEtf.quantity, value: r2(goldEtf.lastPrice * goldEtf.quantity) }]
       : [];
-    const snapshotData = {
+    return {
       label, month, year,
       totalValue: r2(grandTotal),
       assets: [
@@ -1118,6 +1045,11 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
         ...goldEtfSnap,
       ],
     };
+  }, [assets, grandTotal, goldEtf]);
+
+  const saveMonthlySnapshot = useCallback(async () => {
+    const snapshotData = buildSnapshot();
+    const label = snapshotData.label;
     setSnapSaving(true);
     setSnapMsg(null);
     try {
@@ -1136,7 +1068,41 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
       setSnapSaving(false);
       setTimeout(() => setSnapMsg(null), 5000);
     }
-  }, [assets, grandTotal, goldEtf]);
+  }, [buildSnapshot]);
+
+  // ---- Auto-save config sul server (debounce 1.5s) ----
+  // Ogni modifica (asset, cash, oro, startup) viene persistita in data/config.json.
+  // In più aggiorna in automatico lo snapshot del mese corrente (upsert per mese/anno),
+  // così lo storico si costruisce da solo: apri, aggiorni, chiudi.
+  useEffect(() => {
+    if (!configLoaded) return;
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch("/api/config", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            version: CONFIG_VERSION,
+            totalCash, assets, startups, assetClasses, goldEtf, physGold,
+          }),
+        });
+        if (!res.ok) return;
+        setLastSaved(new Date());
+
+        // Auto-snapshot mese corrente (solo se ci sono prezzi)
+        const snap = buildSnapshot();
+        if (snap.assets.length > 0) {
+          await fetch("/api/snapshot", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(snap),
+          });
+          const updated = await fetch("/api/snapshots").then((r) => r.json());
+          if (Array.isArray(updated)) setSnapshots(updated);
+        }
+      } catch { /* offline: localStorage fa da cache */ }
+    }, 1500);
+    return () => clearTimeout(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configLoaded, assets, startups, totalCash, assetClasses, goldEtf, physGold]);
 
   const exportSnapshotsFile = useCallback(() => {
     const blob = new Blob([JSON.stringify(snapshots, null, 2)], { type: "application/json" });
@@ -1299,6 +1265,31 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
             </div>
           )}
 
+          {growthAttribution.length > 0 && (
+            <div className="section-card">
+              <h3 className="section-title"><TrendingUp size={16}/> Crescita: versamenti vs mercato</h3>
+              <div className="kpi-mini-row" style={{ marginBottom: 12 }}>
+                <span>Versamenti: <strong style={{ color: "var(--blue)" }}>{fmt(growthTotals.contrib)}</strong></span>
+                <span>Mercato: <strong style={{ color: growthTotals.market >= 0 ? "var(--green)" : "var(--red)" }}>{fmt(growthTotals.market)}</strong></span>
+                <span className="muted" style={{ fontSize: 12 }}>Solo asset quotati, stimato dagli snapshot mensili</span>
+              </div>
+              <div style={{ height: 240 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={growthAttribution} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>
+                    <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="var(--text-muted)"/>
+                    <YAxis tickFormatter={(v) => `€${(v / 1000).toFixed(1)}k`} tick={{ fontSize: 10 }} stroke="var(--text-muted)"/>
+                    <ReTooltip content={<CustomTooltip/>}/>
+                    <Legend/>
+                    <ReferenceLine y={0} stroke="var(--border2)"/>
+                    <Bar dataKey="contrib" name="Versamenti" stackId="g" fill="#3b82f6" radius={[0, 0, 0, 0]}/>
+                    <Bar dataKey="market"  name="Mercato"    stackId="g" fill="#10b981" radius={[3, 3, 0, 0]}/>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+          )}
+
           <div className="grid-3">
             <div className="section-card">
               <h3 className="section-title"><TrendingUp size={16}/> Miglior performer</h3>
@@ -1429,7 +1420,8 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
           <div>
             <h3 className="section-title" style={{ margin: 0 }}><Settings size={16}/> Configurazione portafoglio</h3>
             <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-              Esporta e importa tutta la tua configurazione (asset, startup, oro, liquidità, asset class) in un file JSON.
+              Il portafoglio viene <strong>salvato automaticamente sul server</strong> a ogni modifica.
+              Export/import JSON servono solo come backup o per migrare su un'altra installazione.
             </p>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -1522,8 +1514,12 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
                     const value  = a.lastPrice ? r2(a.lastPrice * (a.quantity || 0)) : 0;
                     const perfE  = a.costBasis && a.lastPrice ? r2((a.lastPrice - a.costBasis) * (a.quantity || 0)) : 0;
                     const perfP  = a.costBasis && a.lastPrice ? r2(((a.lastPrice - a.costBasis) / a.costBasis) * 100) : 0;
-                    const weight = weights.find((w) => w.id === a.id)?.weight || 0;
-                    const diff   = weight - (a.targetWeight || 0);
+                    // Peso: ETF sul sotto-portafoglio ETF; asset a target totale
+                    // (es. Bitcoin) sul patrimonio intero, come l'oro
+                    const onTotal = isTotalTargetAsset(a);
+                    const denom   = onTotal ? grandTotal : etfSubTotal;
+                    const weight  = denom > 0 ? (value / denom) * 100 : 0;
+                    const diff    = weight - (a.targetWeight || 0);
                     return (
                       <tr key={a.id}>
                         <td className="asset-name">
@@ -1539,9 +1535,12 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
                           {a.lastPrice && a.costBasis ? `${perfE >= 0 ? "+" : ""}${fmt(perfE)}` : "—"}
                         </td>
                         <td className="num">{a.lastPrice && a.costBasis ? <Badge value={perfP}/> : "—"}</td>
-                        <td className="num mono">{weight.toFixed(1)}%</td>
+                        <td className="num mono" title={onTotal ? "Peso % sul patrimonio totale" : "Peso % sul sotto-portafoglio ETF"}>
+                          {weight.toFixed(1)}%{onTotal && <span className="muted" style={{ fontSize: 10 }}> tot</span>}
+                        </td>
                         <td className="num">
-                          <span className={`target-badge ${Math.abs(diff) > 3 ? (diff > 0 ? "over" : "under") : "ok"}`}>
+                          <span className={`target-badge ${Math.abs(diff) > 3 ? (diff > 0 ? "over" : "under") : "ok"}`}
+                            title={onTotal ? "Target % sul patrimonio totale" : "Target % sul sotto-portafoglio ETF"}>
                             {a.targetWeight || 0}%
                           </span>
                         </td>
@@ -1561,8 +1560,9 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
               </table>
             </div>
             <p className="hint-text" style={{ marginTop: 8 }}>
-              <strong>Peso</strong>: % sul totale ETF & Asset (escluso oro) — la somma è sempre 100%.
-              {" "}<strong>Target</strong>: obiettivo dichiarato in % del sotto-portafoglio ETF.
+              <strong>Peso</strong>: % sul totale ETF & Asset (escluso oro e asset "tot") — la somma è sempre 100%.
+              {" "}<strong>Target</strong>: obiettivo in % del sotto-portafoglio ETF.
+              {" "}Gli asset marcati <strong>tot</strong> (es. Bitcoin) hanno peso e target calcolati sul <strong>patrimonio totale</strong>, come l'oro.
             </p>
           </>
         )}
@@ -1870,12 +1870,9 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
 
   // ====================== TAB: REBALANCING ======================
   const renderRebalancing = () => {
-    const {
-      goldBudget, goldQty, goldCurrentPct, goldTargetPct,
-      goldEtfVal, physGoldValue: physGoldVal, goldTotalVal,
-      etfBudget, etfRebalance,
-    } = rebalanceTwoLevel;
-    const hasGoldEtf = !!(goldEtf.identifier && goldEtf.lastPrice);
+    const { itemBuys, etfBudget, etfRebalance } = rebalanceTwoLevel;
+    const totalItemsBudget = r2(itemBuys.reduce((a, x) => a + x.buy, 0));
+    const allAtTarget = itemBuys.length > 0 && totalItemsBudget === 0;
 
     return (
       <div className="tab-content">
@@ -1897,37 +1894,33 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
 
               <div className="grid-3" style={{ marginBottom: "1rem" }}>
                 <KpiCard
-                  label="🥇 Budget Oro"
-                  value={fmt(goldBudget)}
+                  label="🥇 Budget target su patrimonio"
+                  value={fmt(totalItemsBudget)}
                   sub={
-                    hasGoldEtf
-                      ? `Target ${goldTargetPct}% · attuale ${goldCurrentPct}% (ETF ${fmt(goldEtfVal, true)} + fisico ${fmt(physGoldVal, true)})`
-                      : "Nessun ETF oro configurato"
+                    itemBuys.length > 0
+                      ? itemBuys.map((x) => `${x.name.split(" ")[0]} ${fmt(x.buy, true)}`).join(" · ")
+                      : "Nessun asset a target sul patrimonio totale"
                   }
-                  color={goldBudget > 0 ? "green" : "blue"}
+                  color={totalItemsBudget > 0 ? "green" : "blue"}
                 />
                 <KpiCard
                   label="📈 Budget ETF & Asset"
                   value={fmt(etfBudget)}
-                  sub={`${assets.length} asset`}
+                  sub={`${etfAssets.length} asset`}
                   color="blue"
                 />
                 <KpiCard
                   label="💼 Totale"
                   value={fmt(monthBudget)}
-                  sub={
-                    hasGoldEtf && goldCurrentPct >= goldTargetPct
-                      ? "Oro al target → tutto agli ETF"
-                      : `Oro ${goldTargetPct}% · ETF ${100 - goldTargetPct}%`
-                  }
+                  sub={allAtTarget ? "Oro/Bitcoin al target → tutto agli ETF" : "Prima oro e Bitcoin, poi ETF"}
                   color="blue"
                 />
               </div>
 
-              {hasGoldEtf && goldCurrentPct >= goldTargetPct && (
+              {allAtTarget && (
                 <div className="alert alert-amber" style={{ marginBottom: 12 }}>
                   <AlertTriangle size={15}/>
-                  {" "}Oro totale al {goldCurrentPct}% (ETF {fmt(goldEtfVal, true)} + fisico {fmt(physGoldVal, true)}) — già al target {goldTargetPct}% o sopra. Budget interamente allocato agli ETF.
+                  {" "}Tutti gli asset a target sul patrimonio (oro, Bitcoin, …) sono già al target o sopra. Budget interamente allocato agli ETF.
                 </div>
               )}
 
@@ -1938,46 +1931,42 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
               )}
             </div>
 
-            {/* Oro ETF */}
-            {hasGoldEtf && (
+            {/* Livello 1: asset a target sul patrimonio totale */}
+            {itemBuys.length > 0 && (
               <div className="section-card" style={{ borderColor: "rgba(245,158,11,0.4)" }}>
-                <h3 className="section-title" style={{ marginBottom: 4 }}>🥇 Acquisto Oro ETF</h3>
+                <h3 className="section-title" style={{ marginBottom: 4 }}>🥇 Target sul patrimonio totale — Oro & Bitcoin</h3>
                 <p className="hint-text" style={{ marginBottom: 12 }}>
-                  Il peso attuale dell'oro ({goldCurrentPct}%) considera sia l'ETF oro ({fmt(goldEtfVal, true)})
-                  che l'oro fisico ({fmt(physGoldVal, true)}).
-                  Il budget viene indirizzato solo sull'ETF oro (l'oro fisico è illiquido).
+                  Questi asset hanno il target espresso in % del <strong>patrimonio totale</strong> (liquidità + ETF + startup + oro).
+                  Il peso dell'oro considera ETF oro + oro fisico; il budget va solo sull'ETF oro (l'oro fisico è illiquido).
                 </p>
                 <div className="table-wrap">
                   <table className="data-table">
                     <thead>
                       <tr>
                         <th>Asset</th>
-                        <th className="num">Peso oro attuale</th>
-                        <th className="num">Target oro</th>
+                        <th className="num">Peso su patrimonio</th>
+                        <th className="num">Target</th>
                         <th className="num">Acquisto mese</th>
                         <th className="num">Quote acquisto</th>
                       </tr>
                     </thead>
                     <tbody>
-                      <tr>
-                        <td className="asset-name">{goldEtf.name}</td>
-                        <td className="num mono">{goldCurrentPct.toFixed(2)}%</td>
-                        <td className="num mono">{goldTargetPct.toFixed(2)}%</td>
-                        <td className="num mono pos-text">
-                          <strong>{goldBudget > 0 ? fmt(goldBudget) : <span className="muted">—</span>}</strong>
-                        </td>
-                        <td className="num mono">
-                          {goldQty > 0 ? goldQty : <span className="muted">—</span>}
-                        </td>
-                      </tr>
+                      {itemBuys.map((x) => (
+                        <tr key={x.id}>
+                          <td className="asset-name">{x.name}{x.kind === "gold" && <span className="muted" style={{ fontSize: 11 }}> (ETF + fisico)</span>}</td>
+                          <td className="num mono">{x.currentPct.toFixed(2)}%</td>
+                          <td className="num mono">{x.targetPct.toFixed(2)}%</td>
+                          <td className="num mono pos-text">
+                            <strong>{x.buy > 0 ? fmt(x.buy) : <span className="muted">—</span>}</strong>
+                          </td>
+                          <td className="num mono">
+                            {x.qty > 0 ? x.qty : <span className="muted">—</span>}
+                          </td>
+                        </tr>
+                      ))}
                     </tbody>
                   </table>
                 </div>
-                {goldBudget === 0 && (
-                  <p className="hint-text">
-                    Oro (ETF + fisico) già al target o sopra — nessun acquisto ETF oro suggerito questo mese.
-                  </p>
-                )}
               </div>
             )}
 
@@ -2054,6 +2043,11 @@ const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
             <h1 className="app-title">Portfolio Tracker</h1>
             <p className="app-subtitle">
               <Info size={12}/> Aggiornamento automatico ogni 15 min
+              {lastSaved && (
+                <span style={{ color: "var(--green)" }}>
+                  · Salvato {lastSaved.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              )}
               {isLoading && (
                 <span className="loading-dot-row">
                   <span className="loading-dot"/><span className="loading-dot"/><span className="loading-dot"/>

@@ -11,9 +11,17 @@ app.use(express.json());
 // ── Data directory ────────────────────────────────────────────
 const DATA_DIR       = path.join(__dirname, "../data");
 const SNAPSHOTS_FILE = path.join(DATA_DIR, "snapshots.json");
+const CONFIG_FILE    = path.join(DATA_DIR, "config.json");
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 if (!fs.existsSync(SNAPSHOTS_FILE)) fs.writeFileSync(SNAPSHOTS_FILE, "[]");
+
+// Atomic write: temp file + rename, so a crash mid-write never corrupts data
+function writeJsonAtomic(file, data) {
+  const tmp = file + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, file);
+}
 
 function readSnapshots() {
   try { return JSON.parse(fs.readFileSync(SNAPSHOTS_FILE, "utf8")); }
@@ -21,8 +29,32 @@ function readSnapshots() {
 }
 
 function writeSnapshots(data) {
-  fs.writeFileSync(SNAPSHOTS_FILE, JSON.stringify(data, null, 2));
+  writeJsonAtomic(SNAPSHOTS_FILE, data);
 }
+
+// ── Portfolio config persistence ──────────────────────────────
+// The whole portfolio state (assets, cash, gold, startups) lives in
+// data/config.json — the client auto-saves it, no manual export needed.
+app.get("/api/config", (req, res) => {
+  try {
+    if (!fs.existsSync(CONFIG_FILE)) return res.json(null);
+    res.json(JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/config", (req, res) => {
+  try {
+    const cfg = req.body;
+    if (!cfg || !Array.isArray(cfg.assets))
+      return res.status(400).json({ error: "Config non valida" });
+    writeJsonAtomic(CONFIG_FILE, { ...cfg, savedAt: new Date().toISOString() });
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── JustETF price endpoint ────────────────────────────────────
 app.get("/api/quote", async (req, res) => {
