@@ -1,3 +1,4 @@
+require("dotenv").config();
 const path = require("path");
 const fs   = require("fs");
 const express = require("express");
@@ -6,37 +7,59 @@ const fetch   = require("node-fetch");
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
-// ── Data directory ────────────────────────────────────────────
+// ── Modalità ──────────────────────────────────────────────────
+// Supabase configurato  → multi-utente (auth JWT + Postgres).
+// Env mancanti          → legacy single-user (file JSON), come prima.
+// Il fallback garantisce che ogni step resti funzionante.
+const useSupabase = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+let supabase = null;
+let requireAuth = (req, _res, next) => next(); // no-op in legacy
+
+if (useSupabase) {
+  supabase    = require("./supabase");
+  requireAuth = require("./auth");
+  console.log("🔐 Mode: Supabase (multi-user)");
+} else {
+  console.log("📁 Mode: legacy file (single-user)");
+}
+
+// ── File fallback (usato solo in legacy) ──────────────────────
 const DATA_DIR       = path.join(__dirname, "../data");
 const SNAPSHOTS_FILE = path.join(DATA_DIR, "snapshots.json");
 const CONFIG_FILE    = path.join(DATA_DIR, "config.json");
 
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(SNAPSHOTS_FILE)) fs.writeFileSync(SNAPSHOTS_FILE, "[]");
+if (!useSupabase) {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (!fs.existsSync(SNAPSHOTS_FILE)) fs.writeFileSync(SNAPSHOTS_FILE, "[]");
+}
 
-// Atomic write: temp file + rename, so a crash mid-write never corrupts data
 function writeJsonAtomic(file, data) {
   const tmp = file + ".tmp";
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
   fs.renameSync(tmp, file);
 }
-
-function readSnapshots() {
+function readSnapshotsFile() {
   try { return JSON.parse(fs.readFileSync(SNAPSHOTS_FILE, "utf8")); }
   catch { return []; }
 }
 
-function writeSnapshots(data) {
-  writeJsonAtomic(SNAPSHOTS_FILE, data);
-}
+// Mappa riga DB → forma attesa dal client (invariata dai tempi dei file).
+const toClientSnap = (r) => ({
+  label: r.label, month: r.month, year: r.year,
+  totalValue: r.total_value, assets: r.assets, savedAt: r.saved_at,
+});
 
-// ── Portfolio config persistence ──────────────────────────────
-// The whole portfolio state (assets, cash, gold, startups) lives in
-// data/config.json — the client auto-saves it, no manual export needed.
-app.get("/api/config", (req, res) => {
+// ── Config portafoglio ────────────────────────────────────────
+app.get("/api/config", requireAuth, async (req, res) => {
   try {
+    if (useSupabase) {
+      const { data, error } = await supabase
+        .from("portfolios").select("data").eq("user_id", req.userId).maybeSingle();
+      if (error) throw error;
+      return res.json(data?.data ?? null);
+    }
     if (!fs.existsSync(CONFIG_FILE)) return res.json(null);
     res.json(JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8")));
   } catch (err) {
@@ -44,11 +67,19 @@ app.get("/api/config", (req, res) => {
   }
 });
 
-app.post("/api/config", (req, res) => {
+app.post("/api/config", requireAuth, async (req, res) => {
   try {
     const cfg = req.body;
     if (!cfg || !Array.isArray(cfg.assets))
       return res.status(400).json({ error: "Config non valida" });
+
+    if (useSupabase) {
+      const { savedAt, ...data } = cfg; // updated_at lo gestisce il trigger
+      const { error } = await supabase
+        .from("portfolios").upsert({ user_id: req.userId, data }, { onConflict: "user_id" });
+      if (error) throw error;
+      return res.json({ ok: true });
+    }
     writeJsonAtomic(CONFIG_FILE, { ...cfg, savedAt: new Date().toISOString() });
     res.json({ ok: true });
   } catch (err) {
@@ -56,7 +87,7 @@ app.post("/api/config", (req, res) => {
   }
 });
 
-// ── JustETF price endpoint ────────────────────────────────────
+// ── JustETF price (pubblico, nessun dato utente) ──────────────
 app.get("/api/quote", async (req, res) => {
   const isin = req.query.isin;
   if (!isin) return res.status(400).json({ error: "Missing ISIN" });
@@ -67,16 +98,13 @@ app.get("/api/quote", async (req, res) => {
       headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
     });
     if (!r.ok) throw new Error(`JustETF API error: ${r.status}`);
-    const data = await r.json();
-    res.json(data);
+    res.json(await r.json());
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── Gold price endpoint ───────────────────────────────────────
-// Calls gold-api.com for XAU/EUR spot price (per troy oz)
-// Returns: spotEurPerTroyOz, spotEurPerGram, price18ktPerGram
+// ── Gold price (pubblico) ─────────────────────────────────────
 app.get("/api/gold-price", async (req, res) => {
   try {
     const r = await fetch("https://api.gold-api.com/price/XAU/EUR", {
@@ -85,12 +113,9 @@ app.get("/api/gold-price", async (req, res) => {
     if (!r.ok) throw new Error(`gold-api.com error: ${r.status}`);
     const data = await r.json();
 
-    // data.price = EUR per troy oz (XAU standard)
     const spotEurPerTroyOz = data.price;
-    // 1 troy oz = 31.1035 g  →  price per pure gram (24kt)
-    const spotEurPerGram = spotEurPerTroyOz / 31.1035;
-    // 18kt = 75% pure gold
-    const price18ktPerGram = spotEurPerGram * 0.75;
+    const spotEurPerGram   = spotEurPerTroyOz / 31.1035; // 1 troy oz = 31.1035 g
+    const price18ktPerGram = spotEurPerGram * 0.75;       // 18kt = 75% oro puro
 
     res.json({
       spotEurPerTroyOz: Math.round(spotEurPerTroyOz * 100) / 100,
@@ -103,66 +128,91 @@ app.get("/api/gold-price", async (req, res) => {
   }
 });
 
-// ── GET /api/snapshots ────────────────────────────────────────
-app.get("/api/snapshots", (req, res) => {
-  try { res.json(readSnapshots()); }
-  catch (err) { res.status(500).json({ error: err.message }); }
+// ── Snapshots ─────────────────────────────────────────────────
+app.get("/api/snapshots", requireAuth, async (req, res) => {
+  try {
+    if (useSupabase) {
+      const { data, error } = await supabase
+        .from("snapshots").select("*").eq("user_id", req.userId)
+        .order("year", { ascending: true }).order("month", { ascending: true });
+      if (error) throw error;
+      return res.json(data.map(toClientSnap));
+    }
+    res.json(readSnapshotsFile());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// ── POST /api/snapshot ────────────────────────────────────────
-app.post("/api/snapshot", (req, res) => {
+app.post("/api/snapshot", requireAuth, async (req, res) => {
   try {
     const snap = req.body;
     if (!snap || !snap.label || !snap.assets)
       return res.status(400).json({ error: "Dati snapshot non validi" });
 
-    const snapshots = readSnapshots();
-    const existing  = snapshots.findIndex(
-      (s) => s.month === snap.month && s.year === snap.year
-    );
-    const entry = { ...snap, savedAt: new Date().toISOString() };
+    if (useSupabase) {
+      const row = {
+        user_id: req.userId, label: snap.label, year: snap.year, month: snap.month,
+        total_value: snap.totalValue ?? 0, assets: snap.assets,
+      };
+      const { error } = await supabase
+        .from("snapshots").upsert(row, { onConflict: "user_id,year,month" });
+      if (error) throw error;
+      const { count } = await supabase
+        .from("snapshots").select("*", { count: "exact", head: true }).eq("user_id", req.userId);
+      return res.json({ ok: true, total: count });
+    }
 
+    // legacy file: upsert per mese/anno
+    const snapshots = readSnapshotsFile();
+    const existing  = snapshots.findIndex((s) => s.month === snap.month && s.year === snap.year);
+    const entry = { ...snap, savedAt: new Date().toISOString() };
     if (existing >= 0) snapshots[existing] = entry;
     else snapshots.push(entry);
-
-    snapshots.sort((a, b) =>
-      a.year !== b.year ? a.year - b.year : a.month - b.month
-    );
-
-    writeSnapshots(snapshots);
+    snapshots.sort((a, b) => (a.year !== b.year ? a.year - b.year : a.month - b.month));
+    writeJsonAtomic(SNAPSHOTS_FILE, snapshots);
     res.json({ ok: true, total: snapshots.length });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── DELETE /api/snapshot/:label ───────────────────────────────
-app.delete("/api/snapshot/:label", (req, res) => {
+app.delete("/api/snapshot/:label", requireAuth, async (req, res) => {
   try {
-    const label     = decodeURIComponent(req.params.label);
-    const snapshots = readSnapshots().filter((s) => s.label !== label);
-    writeSnapshots(snapshots);
+    const label = decodeURIComponent(req.params.label);
+    if (useSupabase) {
+      const { error } = await supabase
+        .from("snapshots").delete().eq("user_id", req.userId).eq("label", label);
+      if (error) throw error;
+      return res.json({ ok: true });
+    }
+    writeJsonAtomic(SNAPSHOTS_FILE, readSnapshotsFile().filter((s) => s.label !== label));
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── DELETE /api/snapshots/all ─────────────────────────────────
-app.delete("/api/snapshots/all", (req, res) => {
+app.delete("/api/snapshots/all", requireAuth, async (req, res) => {
   try {
-    writeSnapshots([]);
+    if (useSupabase) {
+      const { error } = await supabase.from("snapshots").delete().eq("user_id", req.userId);
+      if (error) throw error;
+      return res.json({ ok: true });
+    }
+    writeJsonAtomic(SNAPSHOTS_FILE, []);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── Serve React frontend ──────────────────────────────────────
-app.use(express.static(path.join(__dirname, "../build")));
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "../build", "index.html"));
-});
+// ── Serve React build (solo se presente: locale sì, Railway no) ──
+const BUILD_DIR = path.join(__dirname, "../build");
+if (fs.existsSync(BUILD_DIR)) {
+  app.use(express.static(BUILD_DIR));
+  app.get("*", (req, res) => res.sendFile(path.join(BUILD_DIR, "index.html")));
+}
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`✅ Server running at http://localhost:${PORT}`));

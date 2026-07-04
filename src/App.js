@@ -13,12 +13,14 @@ import {
   Edit2, Moon, Sun, Download, Search, X, AlertTriangle,
   Activity, LayoutDashboard, Briefcase, Plus, CheckCircle,
   Shield, ChevronUp, ChevronDown, Wallet, Camera, Upload,
-  Settings, Tag,
+  Settings, Tag, LogOut,
 } from "lucide-react";
 import "./styles.css";
 import {
   r2, isTotalTargetAsset, calcRebalancingTwoLevel, calcGrowthAttribution,
 } from "./rebalance";
+import { apiFetch } from "./api";
+import { supabase } from "./supabaseClient";
 
 // ====================== CONSTANTS ======================
 const STORAGE_KEYS = {
@@ -29,11 +31,20 @@ const STORAGE_KEYS = {
   DARK_MODE:     "pf.dark.v1",
   CASH:          "pf.cash.v2",
   ASSET_CLASSES: "pf.assetclasses.v1",
+  SETTINGS:      "pf.settings.v1",
 };
 
 const CONFIG_VERSION  = 3;
 const AUTO_REFRESH_MS = 900_000; // 15 min
-const STARTUP_ABBONAMENTO = 468;
+
+// Impostazioni per-utente (Fase 10). Salvate nel blob config.data, editabili da UI.
+const DEFAULT_SETTINGS = {
+  startupSubscription: 468, // abbonamento startup annuo (era hardcoded)
+  monthlyBudget: 500,       // budget mensile default (ribilanciamento)
+  projReturn: 7,            // rendimento annuo % default (proiezione)
+  projMonthly: 500,         // investimento mensile default (proiezione)
+  projYears: 10,            // anni proiezione default
+};
 
 const MONTH_LABELS_IT = [
   "Gen","Feb","Mar","Apr","Mag","Giu",
@@ -95,18 +106,26 @@ const ls = {
 };
 
 // ====================== RISK METRICS ======================
+// Rendimenti time-weighted: sottrae i flussi di cassa esterni (stipendio/PAC)
+// così i versamenti non vengono contati come guadagno.
+const calcReturns = (history) => {
+  const r = [];
+  for (let i = 1; i < history.length; i++) {
+    if (history[i - 1].v <= 0) continue;
+    r.push((history[i].v - (history[i].cf || 0) - history[i - 1].v) / history[i - 1].v);
+  }
+  return r;
+};
+
 const calcCAGR = (history) => {
   if (history.length < 2) return null;
   const years = (new Date(history.at(-1).t) - new Date(history[0].t)) / (365.25 * 864e5);
-  if (years <= 0 || history[0].v <= 0) return null;
-  return Math.pow(history.at(-1).v / history[0].v, 1 / years) - 1;
-};
-
-const calcReturns = (history) => {
-  const r = [];
-  for (let i = 1; i < history.length; i++)
-    r.push((history[i].v - history[i - 1].v) / history[i - 1].v);
-  return r;
+  if (years <= 0) return null;
+  const r = calcReturns(history);
+  if (!r.length) return null;
+  const growth = r.reduce((acc, x) => acc * (1 + x), 1);
+  if (growth <= 0) return null;
+  return Math.pow(growth, 1 / years) - 1;
 };
 
 const calcVolatility = (history) => {
@@ -118,10 +137,13 @@ const calcVolatility = (history) => {
 };
 
 const calcMaxDrawdown = (history) => {
-  let peak = -Infinity, mdd = 0;
-  for (const h of history) {
-    if (h.v > peak) peak = h.v;
-    const dd = (h.v - peak) / peak;
+  // Drawdown sull'indice dei rendimenti (netti dai versamenti), non sul valore lordo.
+  const r = calcReturns(history);
+  let idx = 1, peak = 1, mdd = 0;
+  for (const x of r) {
+    idx *= 1 + x;
+    if (idx > peak) peak = idx;
+    const dd = (idx - peak) / peak;
     if (dd < mdd) mdd = dd;
   }
   return mdd;
@@ -668,7 +690,7 @@ const usePriceFetcher = () => {
       if (a.manual) return { price: a.lastPrice, ts: Date.now() };
       const isin = (a.identifier || "").trim();
       if (!isISIN(isin)) throw new Error(`ISIN non valido: ${isin}`);
-      const res  = await fetch(`/api/quote?isin=${encodeURIComponent(isin)}`);
+      const res  = await apiFetch(`/api/quote?isin=${encodeURIComponent(isin)}`);
       if (!res.ok) throw new Error(`Errore fetch: ${res.status}`);
       const data = await res.json();
       if (!data.latestQuote?.raw) throw new Error(`Nessun dato per ${isin}`);
@@ -689,10 +711,11 @@ const TABS = [
   { id: "portfolio",   label: "Portafoglio",     icon: Briefcase },
   { id: "projection",  label: "Proiezione",      icon: LineChartIcon },
   { id: "rebalancing", label: "Ribilanciamento", icon: Target },
+  { id: "settings",    label: "Impostazioni",    icon: Settings },
 ];
 
 // ====================== MAIN APP ======================
-export default function App() {
+export default function App({ session } = {}) {
   // ---- State ----
   const [dark,         setDark]    = useLS(STORAGE_KEYS.DARK_MODE, true);
   const [assets,       setAssets]  = useLS(STORAGE_KEYS.ASSETS, []);
@@ -701,6 +724,7 @@ export default function App() {
   const [assetClasses, setAC]      = useLS(STORAGE_KEYS.ASSET_CLASSES, DEFAULT_ASSET_CLASSES);
   const [goldEtf,      setGoldEtf] = useLS(STORAGE_KEYS.GOLD_ETF, GOLD_ETF_DEFAULT);
   const [physGold,     setPhysGold]= useLS(STORAGE_KEYS.PHYS_GOLD, PHYS_GOLD_DEFAULT);
+  const [settings,     setSettings]= useLS(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
 
   const [snapshots,      setSnapshots]    = useState([]);
   const [snapshotSaving, setSnapSaving]   = useState(false);
@@ -719,10 +743,10 @@ export default function App() {
   const [cashInput,     setCashInput]    = useState("");
   const [configMsg,     setConfigMsg]    = useState(null);
 
-  const [projYears,   setProjY] = useState(10);
-  const [projReturn,  setProjR] = useState(7);
-  const [projMonthly, setProjM] = useState(500);
-  const [monthBudget, setBudget] = useState(500);
+  const [projYears,   setProjY] = useState(settings.projYears ?? 10);
+  const [projReturn,  setProjR] = useState(settings.projReturn ?? 7);
+  const [projMonthly, setProjM] = useState(settings.projMonthly ?? 500);
+  const [monthBudget, setBudget] = useState(settings.monthlyBudget ?? 500);
 
   const [goldLoading,  setGoldLoading]  = useState(false);
   const [goldPriceErr, setGoldPriceErr] = useState(null);
@@ -741,7 +765,7 @@ export default function App() {
 
   // Load snapshots from server
   useEffect(() => {
-    fetch("/api/snapshots")
+    apiFetch("/api/snapshots")
       .then((r) => r.json())
       .then((data) => { if (Array.isArray(data)) setSnapshots(data); })
       .catch(() => {});
@@ -754,7 +778,7 @@ export default function App() {
   const [lastSaved,    setLastSaved]    = useState(null);
 
   useEffect(() => {
-    fetch("/api/config")
+    apiFetch("/api/config")
       .then((r) => (r.ok ? r.json() : null))
       .then((cfg) => {
         if (cfg && Array.isArray(cfg.assets)) {
@@ -764,6 +788,15 @@ export default function App() {
           if (Array.isArray(cfg.assetClasses))   setAC(cfg.assetClasses);
           if (cfg.goldEtf)  setGoldEtf(cfg.goldEtf);
           if (cfg.physGold) setPhysGold(cfg.physGold);
+          if (cfg.settings) {
+            const s = { ...DEFAULT_SETTINGS, ...cfg.settings };
+            setSettings(s);
+            // Seed dei controlli proiezione/budget dai default salvati
+            setProjY(s.projYears);
+            setProjR(s.projReturn);
+            setProjM(s.projMonthly);
+            setBudget(s.monthlyBudget);
+          }
         }
       })
       .catch(() => {})
@@ -775,7 +808,7 @@ export default function App() {
   // Calls /api/gold-price which proxies gold-api.com XAU/EUR
   // Backend returns: { spotEurPerTroyOz, spotEurPerGram, price18ktPerGram, updatedAt }
   const fetchGoldSpotPrice = useCallback(async () => {
-  const res = await fetch("/api/gold-price");
+  const res = await apiFetch("/api/gold-price");
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const data = await res.json();
 
@@ -873,7 +906,7 @@ const refreshGoldPrices = useCallback(async () => {
 
   const suTotal    = useMemo(() => startups.reduce((a, s) => a + (s.invested || 0), 0), [startups]);
   const suFees     = useMemo(() => startups.reduce((a, s) => a + (s.fee || 0), 0), [startups]);
-  const suAbbonamenti = STARTUP_ABBONAMENTO;
+  const suAbbonamenti = settings.startupSubscription ?? 0;
   const grandTotal = totals.val + totalCash + physGoldValue + suTotal;
 
   const fullClassDist = useMemo(() => {
@@ -934,12 +967,24 @@ const refreshGoldPrices = useCallback(async () => {
   const projGain     = finalVal - totalContrib;
   const projROI      = totalContrib > 0 ? (projGain / totalContrib) * 100 : 0;
 
-  const histForRisk = useMemo(() =>
-  snapshots.map((s) => ({
-    t: `${s.year}-${String(s.month).padStart(2, "0")}-01`,  // ← sempre mese/anno
-    v: s.totalValue,
-  })),
-  [snapshots]);
+  const histForRisk = useMemo(() => {
+    const pts = snapshots.map((s) => ({
+      t: `${s.year}-${String(s.month).padStart(2, "0")}-01`,  // ← sempre mese/anno
+      v: s.totalValue,
+      pos: Object.fromEntries((s.assets || []).map((a) => [a.id, { q: a.quantity || 0, price: a.price || 0 }])),
+    }));
+    // Flusso esterno del periodo = variazione quantità × prezzo (versamenti/prelievi).
+    for (let i = 0; i < pts.length; i++) {
+      if (i === 0) { pts[i].cf = 0; continue; }
+      const prev = pts[i - 1].pos;
+      let cf = 0;
+      for (const [id, p] of Object.entries(pts[i].pos)) {
+        cf += (p.q - (prev[id]?.q || 0)) * p.price;
+      }
+      pts[i].cf = cf;
+    }
+    return pts;
+  }, [snapshots]);
 
   const riskMetrics = useMemo(() => ({
     cagr:    calcCAGR(histForRisk),
@@ -1053,13 +1098,13 @@ const refreshGoldPrices = useCallback(async () => {
     setSnapSaving(true);
     setSnapMsg(null);
     try {
-      const res  = await fetch("/api/snapshot", {
+      const res  = await apiFetch("/api/snapshot", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify(snapshotData),
       });
       const json = await res.json();
       if (!json.ok) throw new Error("Risposta non valida");
-      const updated = await fetch("/api/snapshots").then((r) => r.json());
+      const updated = await apiFetch("/api/snapshots").then((r) => r.json());
       if (Array.isArray(updated)) setSnapshots(updated);
       setSnapMsg({ type: "ok", text: `✓ Snapshot "${label}" salvato` });
     } catch (e) {
@@ -1078,11 +1123,11 @@ const refreshGoldPrices = useCallback(async () => {
     if (!configLoaded) return;
     const t = setTimeout(async () => {
       try {
-        const res = await fetch("/api/config", {
+        const res = await apiFetch("/api/config", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             version: CONFIG_VERSION,
-            totalCash, assets, startups, assetClasses, goldEtf, physGold,
+            totalCash, assets, startups, assetClasses, goldEtf, physGold, settings,
           }),
         });
         if (!res.ok) return;
@@ -1091,18 +1136,18 @@ const refreshGoldPrices = useCallback(async () => {
         // Auto-snapshot mese corrente (solo se ci sono prezzi)
         const snap = buildSnapshot();
         if (snap.assets.length > 0) {
-          await fetch("/api/snapshot", {
+          await apiFetch("/api/snapshot", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify(snap),
           });
-          const updated = await fetch("/api/snapshots").then((r) => r.json());
+          const updated = await apiFetch("/api/snapshots").then((r) => r.json());
           if (Array.isArray(updated)) setSnapshots(updated);
         }
       } catch { /* offline: localStorage fa da cache */ }
     }, 1500);
     return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [configLoaded, assets, startups, totalCash, assetClasses, goldEtf, physGold]);
+  }, [configLoaded, assets, startups, totalCash, assetClasses, goldEtf, physGold, settings]);
 
   const exportSnapshotsFile = useCallback(() => {
     const blob = new Blob([JSON.stringify(snapshots, null, 2)], { type: "application/json" });
@@ -1121,13 +1166,13 @@ const refreshGoldPrices = useCallback(async () => {
       if (!Array.isArray(parsed)) throw new Error("Il file non contiene un array di snapshot.");
       let count = 0;
       for (const snap of parsed) {
-        const res  = await fetch("/api/snapshot", {
+        const res  = await apiFetch("/api/snapshot", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify(snap),
         });
         if ((await res.json()).ok) count++;
       }
-      const updated = await fetch("/api/snapshots").then((r) => r.json());
+      const updated = await apiFetch("/api/snapshots").then((r) => r.json());
       if (Array.isArray(updated)) setSnapshots(updated);
       setSnapMsg({ type: "ok", text: `✓ Importati ${count} snapshot` });
     } catch (e) {
@@ -1207,7 +1252,7 @@ const refreshGoldPrices = useCallback(async () => {
             Inizia aggiungendo i tuoi investimenti dalla sezione <strong>Portafoglio</strong>.
             Puoi aggiungere ETF, azioni, startup, oro e liquidità.
           </p>
-          <button className="btn btn-primary" onClick={() => setTab("portfolio")} style={{ fontSize: 15, padding: "10px 24px" }}>
+          <button className="btn btn-primary" onClick={() => { setTab("portfolio"); setAssetModal({}); }} style={{ fontSize: 15, padding: "10px 24px" }}>
             <Plus size={16}/> Inizia ad aggiungere asset
           </button>
           <div className="welcome-features">
@@ -1282,8 +1327,12 @@ const refreshGoldPrices = useCallback(async () => {
                     <ReTooltip content={<CustomTooltip/>}/>
                     <Legend/>
                     <ReferenceLine y={0} stroke="var(--border2)"/>
-                    <Bar dataKey="contrib" name="Versamenti" stackId="g" fill="#3b82f6" radius={[0, 0, 0, 0]}/>
-                    <Bar dataKey="market"  name="Mercato"    stackId="g" fill="#10b981" radius={[3, 3, 0, 0]}/>
+                    <Bar dataKey="contrib" name="Versamenti" fill="#3b82f6" radius={[3, 3, 0, 0]}/>
+                    <Bar dataKey="market"  name="Mercato"    radius={[3, 3, 0, 0]}>
+                      {growthAttribution.map((d, i) => (
+                        <Cell key={i} fill={d.market >= 0 ? "#10b981" : "#ef4444"}/>
+                      ))}
+                    </Bar>
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -1816,6 +1865,42 @@ const refreshGoldPrices = useCallback(async () => {
     </div>
   );
 
+  // ====================== TAB: SETTINGS ======================
+  // Fase 10: valori per-utente, salvati nel blob config (auto-save). Zero hardcoded.
+  const setSetting = (key, val, liveSetter) => {
+    setSettings((prev) => ({ ...prev, [key]: val }));
+    if (liveSetter) liveSetter(val); // aggiorna anche il controllo live corrispondente
+  };
+  const renderSettings = () => (
+    <div className="tab-content">
+      <div className="section-card">
+        <h2 className="section-title"><Settings size={16}/> Impostazioni</h2>
+        <p className="welcome-desc" style={{ marginTop: 0 }}>
+          Valori predefiniti personali. Salvati automaticamente sul tuo account.
+        </p>
+        <div className="grid-3" style={{ marginBottom: "1.5rem" }}>
+          {[
+            { key: "startupSubscription", label: "Abbonamento startup annuo (€)", set: null,      step: 1,   min: 0 },
+            { key: "monthlyBudget",       label: "Budget mensile default (€)",    set: setBudget, step: 50,  min: 0 },
+            { key: "projReturn",          label: "Rendimento annuo default (%)",  set: setProjR,  step: 0.5, min: 0, max: 30 },
+            { key: "projMonthly",         label: "Investimento mensile default (€)", set: setProjM, step: 100, min: 0 },
+            { key: "projYears",           label: "Anni proiezione default",       set: setProjY,  step: 1,   min: 1, max: 50 },
+          ].map(({ key, label, set, step, min, max }) => (
+            <label key={key} className="field-label">
+              {label}
+              <input type="number" value={settings[key] ?? 0}
+                onChange={(e) => setSetting(key, parseFloat(e.target.value) || 0, set)}
+                step={step} min={min} max={max} className="field-input"/>
+            </label>
+          ))}
+        </div>
+        <p style={{ fontSize: 12, color: "var(--text-muted, #888)" }}>
+          Le classi di asset si gestiscono dal pulsante dedicato nella tab Portafoglio.
+        </p>
+      </div>
+    </div>
+  );
+
   // ====================== TAB: PROJECTION ======================
   const renderProjection = () => (
     <div className="tab-content">
@@ -2073,6 +2158,12 @@ const refreshGoldPrices = useCallback(async () => {
           <button className="icon-btn theme-toggle" onClick={() => setDark((d) => !d)} title="Cambia tema">
             {dark ? <Sun size={17}/> : <Moon size={17}/>}
           </button>
+          {session && supabase && (
+            <button className="icon-btn theme-toggle" title={`Esci (${session.user?.email || ""})`}
+              onClick={() => supabase.auth.signOut()}>
+              <LogOut size={17}/>
+            </button>
+          )}
         </div>
       </header>
 
@@ -2098,6 +2189,7 @@ const refreshGoldPrices = useCallback(async () => {
         {tab === "portfolio"   && renderPortfolio()}
         {tab === "projection"  && renderProjection()}
         {tab === "rebalancing" && renderRebalancing()}
+        {tab === "settings"    && renderSettings()}
       </main>
 
       {/* Modali */}

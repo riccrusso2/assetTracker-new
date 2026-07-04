@@ -2,5 +2,7 @@ node_modules/
 build/
 data/
 .env
+.env.local
+.env*.local
 .DS_Store
 *.log
