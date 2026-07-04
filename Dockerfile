@@ -13,6 +13,14 @@ RUN npm install --legacy-peer-deps && \
 # Copy source and build
 COPY public/ ./public/
 COPY src/ ./src/
+
+# CRA baka le env REACT_APP_* al momento del build.
+# Railway le passa come build args se dichiarate qui.
+ARG REACT_APP_SUPABASE_URL
+ARG REACT_APP_SUPABASE_ANON_KEY
+ENV REACT_APP_SUPABASE_URL=$REACT_APP_SUPABASE_URL
+ENV REACT_APP_SUPABASE_ANON_KEY=$REACT_APP_SUPABASE_ANON_KEY
+
 RUN npm run build
 
 # =============================================
