@@ -36,7 +36,7 @@ RUN cd server && npm install --production
 
 # Copy built frontend and server
 COPY --from=builder /app/build ./build
-COPY server/server.js ./server/
+COPY server/*.js ./server/
 
 # Create data directory for persistence
 RUN mkdir -p /app/data
