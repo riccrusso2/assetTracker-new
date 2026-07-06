@@ -279,9 +279,10 @@ const exportCSV = (assets) => {
 };
 
 // ====================== COLORS ======================
-const PALETTE = ["#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6",
-                 "#14b8a6","#f97316","#22c55e","#e879f9","#60a5fa",
-                 "#a78bfa","#fb923c","#34d399","#f472b6","#38bdf8"];
+// Distinct qualitative palette (Tableau-style) — max hue separation, avoids near-duplicate colors
+const PALETTE = ["#4e79a7","#f28e2b","#e15759","#76b7b2","#59a14f",
+                 "#edc948","#b07aa1","#ff9da7","#9c755f","#bab0ac",
+                 "#86bcb6","#d37295","#a0cbe8","#8cd17d","#fabfd2"];
 
 const TOTAL_LINE_COLOR       = "#ffffff";
 const TOTAL_LINE_COLOR_LIGHT = "#1e293b";
@@ -731,6 +732,7 @@ export default function App({ session } = {}) {
   const [snapshotMsg,    setSnapMsg]      = useState(null);
 
   const [hiddenLines,  setHiddenLines]  = useState(new Set());
+  const [focusedLine,  setFocusedLine]  = useState(null);
   const [tab,          setTab]          = useState("overview");
   const [search,       setSearch]       = useState("");
 
@@ -1426,11 +1428,15 @@ const refreshGoldPrices = useCallback(async () => {
                             style: { fontSize: 10, fill: "var(--text-muted)" }, offset: 10 }}/>
                         <ReTooltip content={<SnapshotTooltip snapshots={snapshots}/>}/>
                         <Line type="monotone" dataKey="__total__" name="Portafoglio"
-                          stroke={dark ? TOTAL_LINE_COLOR : TOTAL_LINE_COLOR_LIGHT} strokeWidth={2.5}
+                          stroke={dark ? TOTAL_LINE_COLOR : TOTAL_LINE_COLOR_LIGHT}
+                          strokeWidth={focusedLine === "__total__" ? 3.5 : 2.5}
+                          strokeOpacity={focusedLine && focusedLine !== "__total__" ? 0.15 : 1}
                           dot={{ r: 3 }} activeDot={{ r: 5 }} hide={hiddenLines.has("__total__")}/>
                         {assetIds.map((id, i) => (
                           <Line key={id} type="monotone" dataKey={id} name={assetNameMap[id] || id}
-                            stroke={PALETTE[i % PALETTE.length]} strokeWidth={1.5}
+                            stroke={PALETTE[i % PALETTE.length]}
+                            strokeWidth={focusedLine === id ? 3 : 1.5}
+                            strokeOpacity={focusedLine && focusedLine !== id ? 0.15 : 1}
                             dot={snapshotChartData.length === 1 ? { r: 4 } : false}
                             activeDot={{ r: 4 }} hide={hiddenLines.has(id)}/>
                         ))}
@@ -1439,13 +1445,15 @@ const refreshGoldPrices = useCallback(async () => {
                   </div>
                   <div className="snapshot-legend">
                     <button className={`legend-item ${hiddenLines.has("__total__") ? "legend-item--hidden" : ""}`}
-                      onClick={() => toggleLine("__total__")}>
+                      onClick={() => toggleLine("__total__")}
+                      onMouseEnter={() => setFocusedLine("__total__")} onMouseLeave={() => setFocusedLine(null)}>
                       <span className="legend-dot" style={{ background: dark ? TOTAL_LINE_COLOR : TOTAL_LINE_COLOR_LIGHT }}/>
                       Portafoglio
                     </button>
                     {assetIds.map((id, i) => (
                       <button key={id} className={`legend-item ${hiddenLines.has(id) ? "legend-item--hidden" : ""}`}
-                        onClick={() => toggleLine(id)}>
+                        onClick={() => toggleLine(id)}
+                        onMouseEnter={() => setFocusedLine(id)} onMouseLeave={() => setFocusedLine(null)}>
                         <span className="legend-dot" style={{ background: PALETTE[i % PALETTE.length] }}/>
                         {assetNameMap[id] || id}
                       </button>
