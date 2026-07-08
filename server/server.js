@@ -4,6 +4,24 @@ const fs   = require("fs");
 const express = require("express");
 const cors    = require("cors");
 const fetch   = require("node-fetch");
+const dns     = require("dns");
+const https   = require("https");
+
+// Railway/Alpine musl resolver intermittently returns ENOTFOUND for
+// api.gold-api.com (no retry on flaky authoritative NS). Resolve that
+// host via public DNS; SNI stays the hostname so TLS is unaffected.
+const publicResolver = new dns.promises.Resolver();
+publicResolver.setServers(["1.1.1.1", "8.8.8.8"]);
+const goldApiAgent = new https.Agent({
+  lookup: (hostname, opts, cb) =>
+    publicResolver.resolve4(hostname).then(
+      (addrs) =>
+        opts && opts.all
+          ? cb(null, addrs.map((address) => ({ address, family: 4 })))
+          : cb(null, addrs[0], 4),
+      (err) => cb(err),
+    ),
+});
 
 const app = express();
 app.use(cors());
@@ -109,6 +127,7 @@ app.get("/api/gold-price", async (req, res) => {
   try {
     const r = await fetch("https://api.gold-api.com/price/XAU/EUR", {
       headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+      agent: goldApiAgent,
     });
     if (!r.ok) throw new Error(`gold-api.com error: ${r.status}`);
     const data = await r.json();
