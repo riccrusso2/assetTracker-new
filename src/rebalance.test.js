@@ -1,6 +1,6 @@
 import {
   r2, isTotalTargetAsset, calcRebalancing, calcRebalancingTwoLevel,
-  calcGrowthAttribution,
+  calcGrowthAttribution, calcStartupMetrics, calcStartupPortfolio,
 } from "./rebalance";
 
 test("Bitcoin (Crypto) è un asset a target sul patrimonio totale", () => {
@@ -74,4 +74,55 @@ test("attribuzione crescita: versamenti vs mercato", () => {
   expect(rows).toHaveLength(1);
   expect(rows[0].contrib).toBe(550);
   expect(rows[0].market).toBe(100);
+});
+
+// ====================== STARTUP LIFECYCLE ======================
+
+test("startup senza status (config vecchia) vale come attiva, senza P&L", () => {
+  const s = calcStartupMetrics({ name: "Legacy", invested: 5000, fee: 300 });
+  expect(s.status).toBe("active");
+  expect(s.totalCost).toBe(5300);
+  expect(s.closed).toBe(false);
+  expect(s.recovered).toBeNull();
+  expect(s.pnl).toBeNull();
+  expect(s.roiPct).toBeNull();
+});
+
+test("exit: P&L e ROI si calcolano sul costo totale, commissioni incluse", () => {
+  const s = calcStartupMetrics({ name: "Exit", invested: 5000, fee: 500, status: "exit", exitAmount: 8000 });
+  expect(s.totalCost).toBe(5500);
+  expect(s.recovered).toBe(8000);
+  expect(s.pnl).toBe(2500);
+  expect(s.roiPct).toBeCloseTo(45.45, 2);
+});
+
+test("fallita: valore finale 0, perdita pari al costo totale", () => {
+  const s = calcStartupMetrics({ name: "Bust", invested: 4000, fee: 200, status: "failed" });
+  expect(s.recovered).toBe(0);
+  expect(s.pnl).toBe(-4200);
+  expect(s.roiPct).toBe(-100);
+});
+
+test("riepilogo: P&L e ROI solo sulle concluse, le attive restano al costo", () => {
+  const p = calcStartupPortfolio([
+    { id: "a", invested: 10_000, fee: 500 },                                     // attiva
+    { id: "b", invested: 5_000,  fee: 250, status: "exit", exitAmount: 9_000 },  // exit +3.750
+    { id: "c", invested: 3_000,  fee: 150, status: "failed" },                   // fallita −3.150
+  ]);
+  expect(p.investedTot).toBe(18_000);
+  expect(p.feesTot).toBe(900);
+  expect(p.costTot).toBe(18_900);
+  expect(p.activeVal).toBe(10_000);       // solo la attiva entra nel patrimonio
+  expect(p.recoveredTot).toBe(9_000);
+  expect(p.failedLoss).toBe(3_150);
+  expect(p.closedCost).toBe(8_400);       // 5.250 + 3.150
+  expect(p.pnlTot).toBe(600);             // 9.000 − 8.400 → capitale rientrato
+  expect(p.roiPct).toBeCloseTo(7.14, 2);
+});
+
+test("riepilogo senza startup concluse: ROI non calcolabile", () => {
+  const p = calcStartupPortfolio([{ id: "a", invested: 1000, fee: 50 }]);
+  expect(p.closed).toHaveLength(0);
+  expect(p.roiPct).toBeNull();
+  expect(p.pnlTot).toBe(0);
 });
