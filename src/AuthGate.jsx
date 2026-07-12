@@ -24,5 +24,7 @@ export default function AuthGate() {
   if (!ready)    return null;             // primo frame: evita flash
   if (!supabase) return <App />;          // legacy: nessuna auth
   if (!session)  return <Auth />;
-  return <App session={session} />;
+  // key forza remount al cambio utente: azzera state e cache locale,
+  // altrimenti login con altro utente eredita gli asset del precedente.
+  return <App key={session.user.id} session={session} />;
 }
