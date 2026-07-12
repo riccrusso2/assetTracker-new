@@ -113,3 +113,49 @@ export const calcGrowthAttribution = (snapshots) => {
   }
   return rows;
 };
+
+// ====================== STARTUP LIFECYCLE ======================
+// Ogni startup ha un esito: attiva (default), exit (incasso), fallita (valore 0).
+// Config precedenti non hanno `status`: valgono come attive.
+const SU_STATUSES = ["active", "exit", "failed"];
+export const suStatus = (s) => (SU_STATUSES.includes(s?.status) ? s.status : "active");
+
+// Metriche del singolo investimento. recovered/pnl/roiPct sono null finché è attivo.
+export const calcStartupMetrics = (s) => {
+  const status    = suStatus(s);
+  const invested  = s.invested || 0;
+  const fee       = s.fee || 0;
+  const totalCost = r2(invested + fee);
+  const closed    = status !== "active";
+  const recovered = status === "exit" ? (s.exitAmount || 0) : status === "failed" ? 0 : null;
+  const pnl       = closed ? r2(recovered - totalCost) : null;
+  const roiPct    = closed && totalCost > 0 ? r2((pnl / totalCost) * 100) : null;
+  return { ...s, status, invested, fee, totalCost, closed, recovered, pnl, roiPct };
+};
+
+// Riepilogo aggregato del portafoglio startup. P&L e ROI si misurano solo sulle
+// concluse: dicono se il recuperato copre il costo sostenuto, commissioni incluse.
+export const calcStartupPortfolio = (startups) => {
+  const rows   = (startups || []).map(calcStartupMetrics);
+  const active = rows.filter((s) => !s.closed);
+  const closed = rows.filter((s) => s.closed);
+  const failed = rows.filter((s) => s.status === "failed");
+  const sum = (list, f) => r2(list.reduce((a, s) => a + f(s), 0));
+
+  const investedTot  = sum(rows, (s) => s.invested);
+  const feesTot      = sum(rows, (s) => s.fee);
+  const activeVal    = sum(active, (s) => s.invested);
+  const closedCost   = sum(closed, (s) => s.totalCost);
+  const recoveredTot = sum(closed, (s) => s.recovered || 0);
+  const pnlTot       = r2(recoveredTot - closedCost);
+
+  return {
+    rows, active, closed,
+    investedTot, feesTot,
+    costTot:    r2(investedTot + feesTot),
+    activeVal, closedCost, recoveredTot,
+    failedLoss: sum(failed, (s) => s.totalCost),
+    pnlTot,
+    roiPct: closedCost > 0 ? r2((pnlTot / closedCost) * 100) : null,
+  };
+};
