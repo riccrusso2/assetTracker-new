@@ -5,11 +5,11 @@ import React, {
 import {
   PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, LineChart, Line,
-  Legend, AreaChart, Area, ReferenceLine,
+  AreaChart, Area, ComposedChart, ReferenceLine,
 } from "recharts";
 import {
   RefreshCw, TrendingUp, TrendingDown, PieChart as PieChartIcon,
-  BarChart2, LineChart as LineChartIcon, Target, Info, Trash2,
+  LineChart as LineChartIcon, Target, Info, Trash2,
   Edit2, Moon, Sun, Download, Search, X, AlertTriangle,
   Activity, LayoutDashboard, Briefcase, Plus, CheckCircle,
   Shield, ChevronUp, ChevronDown, Wallet, Camera, Upload,
@@ -18,6 +18,7 @@ import {
 import "./styles.css";
 import {
   r2, isTotalTargetAsset, calcRebalancingTwoLevel, calcGrowthAttribution,
+  suStatus, calcStartupPortfolio,
 } from "./rebalance";
 import { apiFetch } from "./api";
 import { supabase } from "./supabaseClient";
@@ -94,6 +95,13 @@ const fmt = (n, compact = false) => {
 const fmtPct = (n) => (n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(2) + "%");
 const isISIN  = (v) => /^[A-Z0-9]{12}$/i.test((v || "").trim());
 const uid     = ()  => Math.random().toString(36).slice(2, 10);
+
+// Etichette UI degli stati startup (logica in rebalance.js).
+const STARTUP_STATUS = {
+  active: { label: "Attiva",  cls: "status-active" },
+  exit:   { label: "Exit",    cls: "status-exit" },
+  failed: { label: "Fallita", cls: "status-failed" },
+};
 
 const ls = {
   get: (key, def) => {
@@ -279,13 +287,21 @@ const exportCSV = (assets) => {
 };
 
 // ====================== COLORS ======================
-// Distinct qualitative palette (Tableau-style) — max hue separation, avoids near-duplicate colors
-const PALETTE = ["#4e79a7","#f28e2b","#e15759","#76b7b2","#59a14f",
-                 "#edc948","#b07aa1","#ff9da7","#9c755f","#bab0ac",
-                 "#86bcb6","#d37295","#a0cbe8","#8cd17d","#fabfd2"];
+// Palette categoriale a 8 slot, un set per tema: gli stessi 8 toni ricalibrati
+// sulla superficie chiara/scura, non un flip automatico. Ordine degli slot fisso
+// (massimizza la separazione percettiva tra vicini, anche per i daltonici) e mai
+// riassegnato in base al rango: un asset tiene il suo colore anche se filtrato.
+const PALETTE_LIGHT = ["#2a78d6","#1baf7a","#eda100","#008300","#4a3aa7","#e34948","#e87ba4","#eb6834"];
+const PALETTE_DARK  = ["#3987e5","#199e70","#c98500","#008300","#9085e9","#e66767","#d55181","#d95926"];
 
-const TOTAL_LINE_COLOR       = "#ffffff";
-const TOTAL_LINE_COLOR_LIGHT = "#1e293b";
+// Oltre l'ottava serie non si generano nuove tinte (indistinguibili sotto CVD):
+// si riusa la stessa tinta con tratto tratteggiato — identità = colore + tratto.
+const seriesDash = (i) => (i >= 8 ? "6 4" : undefined);
+
+// Colori semantici (guadagno/perdita), non categoriali: non vanno mai usati come "serie N".
+const C_GAIN = "#10b981";
+const C_LOSS = "#ef4444";
+const C_CONTRIB = "#3b82f6";
 
 // ====================== COMPONENTS ======================
 
@@ -298,8 +314,8 @@ const Badge = ({ value, suffix = "%" }) => {
   );
 };
 
-const KpiCard = ({ label, value, sub, icon: Icon, trend, color = "blue", compact = false }) => (
-  <div className={`kpi-card kpi-${color}`}>
+const KpiCard = ({ label, value, sub, icon: Icon, trend, trendLabel, color = "blue", compact = false, hero = false, footer = null }) => (
+  <div className={`kpi-card kpi-${color}${hero ? " kpi-hero" : ""}`}>
     <div className="kpi-top">
       <span className="kpi-label">{label}</span>
       {Icon && <Icon className="kpi-icon" />}
@@ -310,10 +326,17 @@ const KpiCard = ({ label, value, sub, icon: Icon, trend, color = "blue", compact
       <div className={`kpi-trend ${trend >= 0 ? "pos" : "neg"}`}>
         {trend >= 0 ? <ChevronUp size={12}/> : <ChevronDown size={12}/>}
         {Math.abs(trend).toFixed(2)}%
+        {trendLabel && <span className="kpi-trend-label">{trendLabel}</span>}
       </div>
     )}
+    {footer}
   </div>
 );
+
+const StatusTag = ({ status }) => {
+  const s = STARTUP_STATUS[status] || STARTUP_STATUS.active;
+  return <span className={`status-tag ${s.cls}`}>{s.label}</span>;
+};
 
 const RiskCard = ({ label, value, fmt: fmtFn, tooltip, quality }) => {
   const display = value == null ? "—" : (fmtFn ? fmtFn(value) : value);
@@ -481,12 +504,22 @@ const AssetModal = ({ asset, assetClasses, onSave, onClose }) => {
 
 // ---- Modal Startup ----
 const StartupModal = ({ startup, onSave, onClose }) => {
-  const [form, setForm] = useState(startup || { name: "", invested: "", fee: "" });
+  const [form, setForm] = useState(
+    startup?.id ? { ...startup, status: suStatus(startup) }
+                : { name: "", invested: "", fee: "", status: "active" });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const handleSave = () => {
     if (!form.name || !form.invested) return;
-    onSave({ id: form.id || uid(), name: form.name,
-      invested: parseFloat(form.invested) || 0, fee: parseFloat(form.fee) || 0 });
+    const status = form.status || "active";
+    onSave({
+      id: form.id || uid(), name: form.name,
+      invested: parseFloat(form.invested) || 0,
+      fee: parseFloat(form.fee) || 0,
+      status,
+      // Exit: importo incassato + note. Fallita/Attiva: campi ripuliti.
+      exitAmount: status === "exit" ? (parseFloat(form.exitAmount) || 0) : undefined,
+      exitNotes:  status === "exit" ? (form.exitNotes || "").trim() || undefined : undefined,
+    });
     onClose();
   };
   return (
@@ -506,6 +539,29 @@ const StartupModal = ({ startup, onSave, onClose }) => {
           <label className="field-label">Commissioni (€)
             <input type="number" step="any" value={form.fee} onChange={(e) => set("fee", e.target.value)} className="field-input"/>
           </label>
+          <label className="field-label">Stato
+            <select value={form.status || "active"} onChange={(e) => set("status", e.target.value)} className="field-input">
+              {Object.entries(STARTUP_STATUS).map(([k, v]) => (
+                <option key={k} value={k}>{v.label}</option>
+              ))}
+            </select>
+          </label>
+          {form.status === "exit" && (
+            <>
+              <label className="field-label">Importo incassato dall'exit (€) *
+                <input type="number" step="any" value={form.exitAmount ?? ""} onChange={(e) => set("exitAmount", e.target.value)} className="field-input"/>
+              </label>
+              <label className="field-label">Note (opzionale)
+                <textarea rows={3} value={form.exitNotes ?? ""} onChange={(e) => set("exitNotes", e.target.value)} className="field-input"
+                  style={{ resize: "vertical", fontFamily: "'Outfit', sans-serif" }}/>
+              </label>
+            </>
+          )}
+          {form.status === "failed" && (
+            <p className="hint-text" style={{ margin: 0 }}>
+              ⚠ Startup fallita: valore finale <strong>0 €</strong>. La perdita sarà pari al costo totale (investito + commissioni).
+            </p>
+          )}
         </div>
         <div className="modal-footer">
           <button className="btn btn-ghost" onClick={onClose}>Annulla</button>
@@ -648,6 +704,19 @@ const CustomTooltip = ({ active, payload, label }) => {
   );
 };
 
+const ProjectionTooltip = ({ active, payload, label, projReturn }) => {
+  if (!active || !payload?.length) return null;
+  const d = payload[0].payload;
+  return (
+    <div className="chart-tooltip" style={{ minWidth: 190 }}>
+      <div className="tooltip-label">Anno {label}</div>
+      <div className="tooltip-row"><span>Ottimistico (+{projReturn + 3}%)</span><span>{fmt(d.optimistic)}</span></div>
+      <div className="tooltip-row" style={{ fontWeight: 700 }}><span>Base ({projReturn}%)</span><span>{fmt(d.base)}</span></div>
+      <div className="tooltip-row"><span>Pessimistico ({Math.max(projReturn - 3, 0)}%)</span><span>{fmt(d.pessimistic)}</span></div>
+    </div>
+  );
+};
+
 const SnapshotTooltip = ({ active, payload, label, snapshots }) => {
   if (!active || !payload?.length) return null;
   const snap = snapshots.find((s) => s.label === label);
@@ -675,9 +744,10 @@ const SnapshotTooltip = ({ active, payload, label, snapshots }) => {
 };
 
 // ====================== HOOKS ======================
-const useLS = (key, init) => {
-  const [v, setV] = useState(() => ls.get(key, init));
-  useEffect(() => ls.set(key, v), [key, v]);
+const useLS = (key, init, uid) => {
+  const fullKey = uid ? `${key}::${uid}` : key;
+  const [v, setV] = useState(() => ls.get(fullKey, init));
+  useEffect(() => ls.set(fullKey, v), [fullKey, v]);
   return [v, setV];
 };
 
@@ -718,14 +788,16 @@ const TABS = [
 // ====================== MAIN APP ======================
 export default function App({ session } = {}) {
   // ---- State ----
-  const [dark,         setDark]    = useLS(STORAGE_KEYS.DARK_MODE, true);
-  const [assets,       setAssets]  = useLS(STORAGE_KEYS.ASSETS, []);
-  const [startups,     setSU]      = useLS(STORAGE_KEYS.STARTUP, []);
-  const [totalCash,    setCash]    = useLS(STORAGE_KEYS.CASH, 0);
-  const [assetClasses, setAC]      = useLS(STORAGE_KEYS.ASSET_CLASSES, DEFAULT_ASSET_CLASSES);
-  const [goldEtf,      setGoldEtf] = useLS(STORAGE_KEYS.GOLD_ETF, GOLD_ETF_DEFAULT);
-  const [physGold,     setPhysGold]= useLS(STORAGE_KEYS.PHYS_GOLD, PHYS_GOLD_DEFAULT);
-  const [settings,     setSettings]= useLS(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS);
+  // uid: namespacing della cache locale per utente (multi-user su stesso browser)
+  const uid = session?.user?.id;
+  const [dark,         setDark]    = useLS(STORAGE_KEYS.DARK_MODE, true, uid);
+  const [assets,       setAssets]  = useLS(STORAGE_KEYS.ASSETS, [], uid);
+  const [startups,     setSU]      = useLS(STORAGE_KEYS.STARTUP, [], uid);
+  const [totalCash,    setCash]    = useLS(STORAGE_KEYS.CASH, 0, uid);
+  const [assetClasses, setAC]      = useLS(STORAGE_KEYS.ASSET_CLASSES, DEFAULT_ASSET_CLASSES, uid);
+  const [goldEtf,      setGoldEtf] = useLS(STORAGE_KEYS.GOLD_ETF, GOLD_ETF_DEFAULT, uid);
+  const [physGold,     setPhysGold]= useLS(STORAGE_KEYS.PHYS_GOLD, PHYS_GOLD_DEFAULT, uid);
+  const [settings,     setSettings]= useLS(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS, uid);
 
   const [snapshots,      setSnapshots]    = useState([]);
   const [snapshotSaving, setSnapSaving]   = useState(false);
@@ -785,20 +857,28 @@ export default function App({ session } = {}) {
       .then((cfg) => {
         if (cfg && Array.isArray(cfg.assets)) {
           setAssets(cfg.assets);
-          if (Array.isArray(cfg.startups))       setSU(cfg.startups);
-          if (typeof cfg.totalCash === "number") setCash(cfg.totalCash);
-          if (Array.isArray(cfg.assetClasses))   setAC(cfg.assetClasses);
-          if (cfg.goldEtf)  setGoldEtf(cfg.goldEtf);
-          if (cfg.physGold) setPhysGold(cfg.physGold);
-          if (cfg.settings) {
-            const s = { ...DEFAULT_SETTINGS, ...cfg.settings };
-            setSettings(s);
-            // Seed dei controlli proiezione/budget dai default salvati
-            setProjY(s.projYears);
-            setProjR(s.projReturn);
-            setProjM(s.projMonthly);
-            setBudget(s.monthlyBudget);
-          }
+          setSU(Array.isArray(cfg.startups) ? cfg.startups : []);
+          setCash(typeof cfg.totalCash === "number" ? cfg.totalCash : 0);
+          setAC(Array.isArray(cfg.assetClasses) ? cfg.assetClasses : DEFAULT_ASSET_CLASSES);
+          setGoldEtf(cfg.goldEtf || GOLD_ETF_DEFAULT);
+          setPhysGold(cfg.physGold || PHYS_GOLD_DEFAULT);
+          const s = { ...DEFAULT_SETTINGS, ...(cfg.settings || {}) };
+          setSettings(s);
+          // Seed dei controlli proiezione/budget dai default salvati
+          setProjY(s.projYears);
+          setProjR(s.projReturn);
+          setProjM(s.projMonthly);
+          setBudget(s.monthlyBudget);
+        } else {
+          // Nessun portfolio salvato per questo utente: azzera cache locale,
+          // altrimenti resta visibile l'ultimo stato cachato in localStorage.
+          setAssets([]);
+          setSU([]);
+          setCash(0);
+          setAC(DEFAULT_ASSET_CLASSES);
+          setGoldEtf(GOLD_ETF_DEFAULT);
+          setPhysGold(PHYS_GOLD_DEFAULT);
+          setSettings(DEFAULT_SETTINGS);
         }
       })
       .catch(() => {})
@@ -906,10 +986,26 @@ const refreshGoldPrices = useCallback(async () => {
 
   const goldTotal = goldEtfValue + physGoldValue;
 
-  const suTotal    = useMemo(() => startups.reduce((a, s) => a + (s.invested || 0), 0), [startups]);
-  const suFees     = useMemo(() => startups.reduce((a, s) => a + (s.fee || 0), 0), [startups]);
+  // Le startup concluse (exit/failed) escono dal patrimonio: l'incasso di un'exit
+  // va registrato manualmente in liquidità.
+  const startupStats = useMemo(() => calcStartupPortfolio(startups), [startups]);
+
+  const suTotal    = startupStats.activeVal;   // solo startup attive → patrimonio
+  const suFees     = startupStats.feesTot;
   const suAbbonamenti = settings.startupSubscription ?? 0;
   const grandTotal = totals.val + totalCash + physGoldValue + suTotal;
+
+  // Variazione patrimonio vs ultimo snapshot chiuso (mese corrente escluso: è auto-aggiornato).
+  const monthDelta = useMemo(() => {
+    const now = new Date(), m = now.getMonth() + 1, y = now.getFullYear();
+    const prev = [...snapshots].reverse().find((s) => !(s.month === m && s.year === y));
+    if (!prev?.totalValue) return null;
+    return {
+      label: prev.label,
+      abs: r2(grandTotal - prev.totalValue),
+      pct: r2(((grandTotal - prev.totalValue) / prev.totalValue) * 100),
+    };
+  }, [snapshots, grandTotal]);
 
   const fullClassDist = useMemo(() => {
     const base = [...classDist];
@@ -964,6 +1060,12 @@ const refreshGoldPrices = useCallback(async () => {
   const projData = useMemo(() => calcProjectionScenarios(grandTotal, projMonthly, projReturn, projYears),
     [grandTotal, projMonthly, projReturn, projYears]);
 
+  // La proiezione è un intervallo, non tre curve indipendenti: una banda
+  // pessimistico→ottimistico più la linea dello scenario base.
+  const projChartData = useMemo(
+    () => projData.map((d) => ({ ...d, range: [d.pessimistic, d.optimistic] })),
+    [projData]);
+
   const finalVal     = projData.at(-1)?.base ?? 0;
   const totalContrib = grandTotal + projMonthly * 12 * projYears;
   const projGain     = finalVal - totalContrib;
@@ -997,6 +1099,15 @@ const refreshGoldPrices = useCallback(async () => {
   }), [histForRisk]);
 
   const { data: snapshotChartData, assetIds } = useMemo(() => buildChartData(snapshots), [snapshots]);
+
+  // Palette del tema corrente. Lo slot dipende dalla posizione dell'asset, non dal suo valore.
+  const palette = dark ? PALETTE_DARK : PALETTE_LIGHT;
+  const seriesColor = (i) => palette[i % palette.length];
+
+  // Patrimonio in euro nel tempo (asse unico, valuta): il dato che si guarda per primo.
+  const patrimonioData = useMemo(
+    () => snapshots.map((s) => ({ label: s.label, value: r2(s.totalValue || 0) })),
+    [snapshots]);
 
   const growthAttribution = useMemo(() => calcGrowthAttribution(snapshots), [snapshots]);
   const growthTotals = useMemo(() => ({
@@ -1268,24 +1379,184 @@ const refreshGoldPrices = useCallback(async () => {
         </div>
       ) : (
         <>
-          <div className="grid-4">
-            <KpiCard label="Patrimonio totale" value={fmt(grandTotal, true)} icon={Wallet}
-              sub={`Liquidità: ${fmt(totalCash)}`} color="blue"/>
-            <KpiCard
-            label="ETF & Asset quotati"
-            value={fmt(totals.val, true)}
-            icon={Activity}
-            trend={totals.ret * 100}
-            color="blue"
-          />
-            <KpiCard label="Oro" 
-              value={fmt(goldTotal, true)}
+          <div className="hero-grid">
+            <KpiCard hero label="Patrimonio totale" value={fmt(grandTotal)} icon={Wallet}
+              sub={`Liquidità: ${fmt(totalCash)}`} color="blue"
+              trend={monthDelta?.pct} trendLabel={monthDelta ? `${fmt(monthDelta.abs)} vs ${monthDelta.label}` : null}
+              footer={
+                <div className="hero-chips">
+                  <span className={`chip ${drift > 5 ? "chip-warn" : "chip-ok"}`}>
+                    {drift > 5 ? <AlertTriangle size={12}/> : <CheckCircle size={12}/>}
+                    Drift {drift.toFixed(1)}%
+                  </span>
+                  <span className="chip">
+                    <Camera size={12}/> {snapshots.length} snapshot
+                  </span>
+                </div>
+              }/>
+            <KpiCard compact label="ETF & Asset quotati" value={fmt(totals.val, true)} icon={Activity}
+              trend={totals.ret * 100} color="blue"/>
+            <KpiCard compact label="Oro" value={fmt(goldTotal, true)} icon={Shield}
               color={goldEtfValue >= goldEtfCost ? "green" : "red"}
+              sub={goldTotal > 0 && grandTotal > 0 ? `${((goldTotal / grandTotal) * 100).toFixed(1)}% del patrimonio` : null}
               trend={goldEtfPerfPct}/>
-            <KpiCard label="Startup"
-              value={fmt(suTotal, true)}
-              sub={suFees > 0 ? `Commissioni: ${fmt(suFees)}, Abbonamento: ${fmt(suAbbonamenti)}` : `Abbonamento: ${fmt(suAbbonamenti)}`}
-              color="blue"/>
+            <KpiCard compact label="Startup attive" value={fmt(suTotal, true)} icon={Briefcase}
+              color={startupStats.closed.length > 0 && startupStats.pnlTot < 0 ? "red" : "blue"}
+              sub={`Commissioni: ${fmt(suFees)} · Abbonamento: ${fmt(suAbbonamenti)}`}
+              footer={startupStats.closed.length > 0 && (
+                <div className="kpi-sub" style={{ marginTop: 6 }}>
+                  Realizzato:{" "}
+                  <strong style={{ color: startupStats.pnlTot >= 0 ? "var(--green)" : "var(--red)" }}>
+                    {fmt(startupStats.pnlTot)}
+                  </strong>{" "}
+                  su {startupStats.closed.length} conclus{startupStats.closed.length === 1 ? "a" : "e"}
+                </div>
+              )}/>
+          </div>
+
+          {patrimonioData.length > 1 && (
+            <div className="section-card">
+              <h3 className="section-title"><TrendingUp size={16}/> Andamento patrimonio</h3>
+              <div style={{ height: 260 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={patrimonioData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+                    <defs>
+                      <linearGradient id="gPatrimonio" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%"  stopColor={palette[0]} stopOpacity={0.25}/>
+                        <stop offset="95%" stopColor={palette[0]} stopOpacity={0}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid stroke="var(--border)" vertical={false}/>
+                    <XAxis dataKey="label" tick={{ fontSize: 11 }} stroke="var(--text-muted)"/>
+                    <YAxis tickFormatter={(v) => `€${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 11 }}
+                      stroke="var(--text-muted)" domain={["auto", "auto"]} width={56}/>
+                    <ReTooltip content={<CustomTooltip/>}/>
+                    <Area type="monotone" dataKey="value" name="Patrimonio"
+                      stroke={palette[0]} strokeWidth={2} fill="url(#gPatrimonio)"
+                      dot={false} activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--bg-card)" }}/>
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="hint-text" style={{ marginTop: 4 }}>
+                Valore totale del portafoglio a ogni snapshot mensile. Include i versamenti:
+                per separare mercato e versamenti guarda il grafico "Crescita" più sotto.
+              </p>
+            </div>
+          )}
+
+          <div className="grid-2">
+            {fullClassDist.length > 0 && (
+              <div className="section-card">
+                <h3 className="section-title"><PieChartIcon size={16}/> Asset allocation</h3>
+                <div style={{ height: 240 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie data={fullClassDist} dataKey="value" nameKey="name"
+                        cx="50%" cy="50%" outerRadius={95} innerRadius={52}
+                        stroke="var(--bg-card)" strokeWidth={2}>
+                        {fullClassDist.map((_, i) => <Cell key={i} fill={seriesColor(i)}/>)}
+                      </Pie>
+                      <ReTooltip formatter={(v, n) => [fmt(v), n]}/>
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="alloc-legend">
+                  {fullClassDist.map((d, i) => (
+                    <div key={d.name} className="alloc-row">
+                      <span className="legend-dot" style={{ background: seriesColor(i) }}/>
+                      <span className="alloc-name">{d.name}</span>
+                      <span className="alloc-val mono">{fmt(d.value)}</span>
+                      <span className="alloc-pct mono">
+                        {grandTotal > 0 ? ((d.value / grandTotal) * 100).toFixed(1) : "0.0"}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="section-card">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <h3 className="section-title" style={{ margin: 0 }}><LineChartIcon size={16}/> Prezzi asset — base 100</h3>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  {snapshotMsg && (
+                    <span style={{ fontSize: 12, color: snapshotMsg.type === "ok" ? "var(--green)" : "var(--red)" }}>
+                      {snapshotMsg.text}
+                    </span>
+                  )}
+                  <input ref={importSnapshotsRef} type="file" accept=".json" style={{ display: "none" }}
+                    onChange={(e) => { importSnapshots(e.target.files[0]); e.target.value = ""; }}/>
+                  <button className="btn btn-ghost" onClick={() => importSnapshotsRef.current?.click()} style={{ fontSize: 12, padding: "6px 12px" }}>
+                    <Upload size={13}/> Importa
+                  </button>
+                  <button className="btn btn-ghost" onClick={exportSnapshotsFile} disabled={snapshots.length === 0} style={{ fontSize: 12, padding: "6px 12px" }}>
+                    <Download size={13}/> Esporta{snapshots.length > 0 ? ` (${snapshots.length})` : ""}
+                  </button>
+                  <button className="btn btn-primary" onClick={saveMonthlySnapshot}
+                    disabled={snapshotSaving || isLoading || assets.length === 0} style={{ fontSize: 12, padding: "6px 12px" }}>
+                    <Camera size={13}/> {snapshotSaving ? "Salvataggio…" : "Snapshot mensile"}
+                  </button>
+                </div>
+              </div>
+              {snapshotChartData.length === 0 ? (
+                <div className="chart-empty" style={{ height: 280 }}>
+                  <div style={{ textAlign: "center" }}>
+                    <p className="muted" style={{ marginBottom: 8 }}>Nessuno snapshot registrato.</p>
+                    <p className="muted" style={{ fontSize: 12 }}>Premi <strong>Snapshot mensile</strong> ogni mese per tracciare l'andamento.</p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div style={{ height: 260 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <LineChart data={snapshotChartData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
+                        <CartesianGrid stroke="var(--border)" vertical={false}/>
+                        <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="var(--text-muted)"/>
+                        <YAxis tickFormatter={(v) => v + ""} tick={{ fontSize: 10 }} stroke="var(--text-muted)" domain={["auto","auto"]}
+                          label={{ value: "Indice (base 100)", angle: -90, position: "insideLeft",
+                            style: { fontSize: 10, fill: "var(--text-muted)" }, offset: 10 }}/>
+                        <ReTooltip content={<SnapshotTooltip snapshots={snapshots}/>}/>
+                        <ReferenceLine y={100} stroke="var(--border2)"/>
+                        {assetIds.map((id, i) => (
+                          <Line key={id} type="monotone" dataKey={id} name={assetNameMap[id] || id}
+                            stroke={seriesColor(i)} strokeDasharray={seriesDash(i)}
+                            strokeWidth={focusedLine === id ? 3 : 2}
+                            strokeOpacity={focusedLine && focusedLine !== id ? 0.15 : 1}
+                            dot={snapshotChartData.length === 1 ? { r: 4 } : false}
+                            activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--bg-card)" }} hide={hiddenLines.has(id)}/>
+                        ))}
+                      </LineChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="snapshot-legend">
+                    {assetIds.map((id, i) => (
+                      <button key={id} className={`legend-item ${hiddenLines.has(id) ? "legend-item--hidden" : ""}`}
+                        onClick={() => toggleLine(id)}
+                        onMouseEnter={() => setFocusedLine(id)} onMouseLeave={() => setFocusedLine(null)}>
+                        <span className={`legend-line ${seriesDash(i) ? "legend-line--dashed" : ""}`}
+                          style={{ color: seriesColor(i) }}/>
+                        {assetNameMap[id] || id}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="grid-2">
+            <div className="section-card">
+              <h3 className="section-title"><TrendingUp size={16}/> Miglior performer</h3>
+              {totals.best
+                ? <><div className="big-name">{totals.best.name}</div><Badge value={totals.best.perf * 100}/></>
+                : <p className="muted">Nessun dato disponibile</p>}
+            </div>
+            <div className="section-card">
+              <h3 className="section-title"><TrendingDown size={16}/> Peggior performer</h3>
+              {totals.worst
+                ? <><div className="big-name">{totals.worst.name}</div><Badge value={totals.worst.perf * 100}/></>
+                : <p className="muted">Nessun dato disponibile</p>}
+            </div>
           </div>
 
           {snapshots.length > 2 && (
@@ -1320,19 +1591,23 @@ const refreshGoldPrices = useCallback(async () => {
                 <span>Mercato: <strong style={{ color: growthTotals.market >= 0 ? "var(--green)" : "var(--red)" }}>{fmt(growthTotals.market)}</strong></span>
                 <span className="muted" style={{ fontSize: 12 }}>Solo asset quotati, stimato dagli snapshot mensili</span>
               </div>
+              <div className="chart-legend">
+                <span className="cl-item"><span className="cl-swatch" style={{ background: C_CONTRIB }}/>Versamenti</span>
+                <span className="cl-item"><span className="cl-swatch" style={{ background: C_GAIN }}/>Mercato in guadagno</span>
+                <span className="cl-item"><span className="cl-swatch" style={{ background: C_LOSS }}/>Mercato in perdita</span>
+              </div>
               <div style={{ height: 240 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={growthAttribution} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>
+                  <BarChart data={growthAttribution} margin={{ top: 4, right: 16, left: 0, bottom: 4 }} barGap={2}>
+                    <CartesianGrid stroke="var(--border)" vertical={false}/>
                     <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="var(--text-muted)"/>
-                    <YAxis tickFormatter={(v) => `€${(v / 1000).toFixed(1)}k`} tick={{ fontSize: 10 }} stroke="var(--text-muted)"/>
-                    <ReTooltip content={<CustomTooltip/>}/>
-                    <Legend/>
+                    <YAxis tickFormatter={(v) => `€${(v / 1000).toFixed(1)}k`} tick={{ fontSize: 10 }} stroke="var(--text-muted)" width={56}/>
+                    <ReTooltip content={<CustomTooltip/>} cursor={{ fill: "var(--bg-card2)" }}/>
                     <ReferenceLine y={0} stroke="var(--border2)"/>
-                    <Bar dataKey="contrib" name="Versamenti" fill="#3b82f6" radius={[3, 3, 0, 0]}/>
-                    <Bar dataKey="market"  name="Mercato"    radius={[3, 3, 0, 0]}>
+                    <Bar dataKey="contrib" name="Versamenti" fill={C_CONTRIB} radius={[4, 4, 0, 0]}/>
+                    <Bar dataKey="market"  name="Mercato" fill={C_GAIN} radius={[4, 4, 0, 0]}>
                       {growthAttribution.map((d, i) => (
-                        <Cell key={i} fill={d.market >= 0 ? "#10b981" : "#ef4444"}/>
+                        <Cell key={i} fill={d.market >= 0 ? C_GAIN : C_LOSS}/>
                       ))}
                     </Bar>
                   </BarChart>
@@ -1340,129 +1615,6 @@ const refreshGoldPrices = useCallback(async () => {
               </div>
             </div>
           )}
-
-          <div className="grid-3">
-            <div className="section-card">
-              <h3 className="section-title"><TrendingUp size={16}/> Miglior performer</h3>
-              {totals.best
-                ? <><div className="big-name">{totals.best.name}</div><Badge value={totals.best.perf * 100}/></>
-                : <p className="muted">Nessun dato disponibile</p>}
-            </div>
-            <div className="section-card">
-              <h3 className="section-title"><TrendingDown size={16}/> Peggior performer</h3>
-              {totals.worst
-                ? <><div className="big-name">{totals.worst.name}</div><Badge value={totals.worst.perf * 100}/></>
-                : <p className="muted">Nessun dato disponibile</p>}
-            </div>
-            <div className="section-card">
-              <h3 className="section-title"><BarChart2 size={16}/> Composizione</h3>
-              <div className="stat-row"><span>ETF / Asset quotati</span><strong>{fmt(totals.val)}</strong></div>
-              <div className="stat-row"><span>Startup</span><strong>{fmt(suTotal)}</strong></div>
-              <div className="stat-row">
-                <span>Oro</span>
-                <strong>{fmt(goldTotal)}</strong>
-              </div>
-              <div className="stat-row"><span>Liquidità</span><strong>{fmt(totalCash)}</strong></div>
-            </div>
-          </div>
-
-          <div className="grid-2">
-            {fullClassDist.length > 0 && (
-              <div className="section-card">
-                <h3 className="section-title"><PieChartIcon size={16}/> Asset allocation</h3>
-                <div style={{ height: 280 }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={fullClassDist} dataKey="value" nameKey="name"
-                        cx="50%" cy="50%" outerRadius={95} innerRadius={45}
-                        label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
-                        labelLine={false}>
-                        {fullClassDist.map((_, i) => <Cell key={i} fill={PALETTE[i % PALETTE.length]}/>)}
-                      </Pie>
-                      <ReTooltip formatter={(v, n) => [fmt(v), n]}/>
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-            )}
-
-            <div className="section-card">
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-                <h3 className="section-title" style={{ margin: 0 }}><LineChartIcon size={16}/> Storico prezzi mensile</h3>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  {snapshotMsg && (
-                    <span style={{ fontSize: 12, color: snapshotMsg.type === "ok" ? "var(--green)" : "var(--red)" }}>
-                      {snapshotMsg.text}
-                    </span>
-                  )}
-                  <input ref={importSnapshotsRef} type="file" accept=".json" style={{ display: "none" }}
-                    onChange={(e) => { importSnapshots(e.target.files[0]); e.target.value = ""; }}/>
-                  <button className="btn btn-ghost" onClick={() => importSnapshotsRef.current?.click()} style={{ fontSize: 12, padding: "6px 12px" }}>
-                    <Upload size={13}/> Importa
-                  </button>
-                  <button className="btn btn-ghost" onClick={exportSnapshotsFile} disabled={snapshots.length === 0} style={{ fontSize: 12, padding: "6px 12px" }}>
-                    <Download size={13}/> Esporta{snapshots.length > 0 ? ` (${snapshots.length})` : ""}
-                  </button>
-                  <button className="btn btn-primary" onClick={saveMonthlySnapshot}
-                    disabled={snapshotSaving || isLoading || assets.length === 0} style={{ fontSize: 12, padding: "6px 12px" }}>
-                    <Camera size={13}/> {snapshotSaving ? "Salvataggio…" : "Snapshot mensile"}
-                  </button>
-                </div>
-              </div>
-              {snapshotChartData.length === 0 ? (
-                <div className="chart-empty" style={{ height: 280 }}>
-                  <div style={{ textAlign: "center" }}>
-                    <p className="muted" style={{ marginBottom: 8 }}>Nessuno snapshot registrato.</p>
-                    <p className="muted" style={{ fontSize: 12 }}>Premi <strong>Snapshot mensile</strong> ogni mese per tracciare l'andamento.</p>
-                  </div>
-                </div>
-              ) : (
-                <>
-                  <div style={{ height: 260 }}>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={snapshotChartData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>
-                        <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="var(--text-muted)"/>
-                        <YAxis tickFormatter={(v) => v + ""} tick={{ fontSize: 10 }} stroke="var(--text-muted)" domain={["auto","auto"]}
-                          label={{ value: "Indice (base 100)", angle: -90, position: "insideLeft",
-                            style: { fontSize: 10, fill: "var(--text-muted)" }, offset: 10 }}/>
-                        <ReTooltip content={<SnapshotTooltip snapshots={snapshots}/>}/>
-                        <Line type="monotone" dataKey="__total__" name="Portafoglio"
-                          stroke={dark ? TOTAL_LINE_COLOR : TOTAL_LINE_COLOR_LIGHT}
-                          strokeWidth={focusedLine === "__total__" ? 3.5 : 2.5}
-                          strokeOpacity={focusedLine && focusedLine !== "__total__" ? 0.15 : 1}
-                          dot={{ r: 3 }} activeDot={{ r: 5 }} hide={hiddenLines.has("__total__")}/>
-                        {assetIds.map((id, i) => (
-                          <Line key={id} type="monotone" dataKey={id} name={assetNameMap[id] || id}
-                            stroke={PALETTE[i % PALETTE.length]}
-                            strokeWidth={focusedLine === id ? 3 : 1.5}
-                            strokeOpacity={focusedLine && focusedLine !== id ? 0.15 : 1}
-                            dot={snapshotChartData.length === 1 ? { r: 4 } : false}
-                            activeDot={{ r: 4 }} hide={hiddenLines.has(id)}/>
-                        ))}
-                      </LineChart>
-                    </ResponsiveContainer>
-                  </div>
-                  <div className="snapshot-legend">
-                    <button className={`legend-item ${hiddenLines.has("__total__") ? "legend-item--hidden" : ""}`}
-                      onClick={() => toggleLine("__total__")}
-                      onMouseEnter={() => setFocusedLine("__total__")} onMouseLeave={() => setFocusedLine(null)}>
-                      <span className="legend-dot" style={{ background: dark ? TOTAL_LINE_COLOR : TOTAL_LINE_COLOR_LIGHT }}/>
-                      Portafoglio
-                    </button>
-                    {assetIds.map((id, i) => (
-                      <button key={id} className={`legend-item ${hiddenLines.has(id) ? "legend-item--hidden" : ""}`}
-                        onClick={() => toggleLine(id)}
-                        onMouseEnter={() => setFocusedLine(id)} onMouseLeave={() => setFocusedLine(null)}>
-                        <span className="legend-dot" style={{ background: PALETTE[i % PALETTE.length] }}/>
-                        {assetNameMap[id] || id}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
         </>
       )}
     </div>
@@ -1471,34 +1623,6 @@ const refreshGoldPrices = useCallback(async () => {
   // ====================== TAB: PORTFOLIO ======================
   const renderPortfolio = () => (
     <div className="tab-content">
-      {/* Config export/import */}
-      <div className="section-card" style={{ borderColor: "var(--blue)" }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-          <div>
-            <h3 className="section-title" style={{ margin: 0 }}><Settings size={16}/> Configurazione portafoglio</h3>
-            <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-              Il portafoglio viene <strong>salvato automaticamente sul server</strong> a ogni modifica.
-              Export/import JSON servono solo come backup o per migrare su un'altra installazione.
-            </p>
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            {configMsg && (
-              <span style={{ fontSize: 12, color: configMsg.type === "ok" ? "var(--green)" : "var(--red)" }}>
-                {configMsg.text}
-              </span>
-            )}
-            <input ref={configImportRef} type="file" accept=".json" style={{ display: "none" }}
-              onChange={(e) => { importConfig(e.target.files[0]); e.target.value = ""; }}/>
-            <button className="btn btn-ghost" onClick={() => configImportRef.current?.click()}>
-              <Upload size={15}/> Importa
-            </button>
-            <button className="btn btn-primary" onClick={exportConfig}>
-              <Download size={15}/> Esporta configurazione
-            </button>
-          </div>
-        </div>
-      </div>
-
       {/* Liquidità */}
       <div className="section-card">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
@@ -1828,19 +1952,67 @@ const refreshGoldPrices = useCallback(async () => {
 
       {/* Startup */}
       <div className="section-card">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <h2 className="section-title" style={{ margin: 0 }}><Activity size={16}/> Investimenti Startup</h2>
             {startups.length > 0 && (
               <div className="kpi-mini-row" style={{ marginBottom: 0 }}>
-                <span>Totale: <strong>{fmt(suTotal)}</strong></span>
-                <span>Commissioni: <strong>{fmt(suFees)}</strong></span>
+                <span>Attive: <strong>{startupStats.active.length}</strong></span>
+                <span>Concluse: <strong>{startupStats.closed.length}</strong></span>
                 <span>Abbonamento: <strong>{fmt(suAbbonamenti)}</strong></span>
               </div>
             )}
           </div>
           <button className="btn btn-primary" onClick={() => setStartupModal({})}><Plus size={15}/> Aggiungi startup</button>
         </div>
+
+        {startups.length > 0 && (
+          <>
+            <div className="summary-strip">
+              <div className="ss-item">
+                <span className="ss-label">Capitale investito</span>
+                <span className="ss-value mono">{fmt(startupStats.investedTot)}</span>
+              </div>
+              <div className="ss-item">
+                <span className="ss-label">Commissioni</span>
+                <span className="ss-value mono">{fmt(startupStats.feesTot)}</span>
+              </div>
+              <div className="ss-item">
+                <span className="ss-label">Costo totale</span>
+                <span className="ss-value mono">{fmt(startupStats.costTot)}</span>
+              </div>
+              <div className="ss-item">
+                <span className="ss-label">Recuperato da exit</span>
+                <span className="ss-value mono pos-text">{fmt(startupStats.recoveredTot)}</span>
+              </div>
+              <div className="ss-item">
+                <span className="ss-label">Perdite da fallimenti</span>
+                <span className="ss-value mono neg-text">{startupStats.failedLoss > 0 ? `−${fmt(startupStats.failedLoss)}` : fmt(0)}</span>
+              </div>
+              <div className="ss-item ss-item--strong">
+                <span className="ss-label">P&amp;L realizzato</span>
+                <span className="ss-value mono" style={{ color: startupStats.pnlTot >= 0 ? "var(--green)" : "var(--red)" }}>
+                  {startupStats.closed.length > 0 ? fmt(startupStats.pnlTot) : "—"}
+                </span>
+              </div>
+              <div className="ss-item ss-item--strong">
+                <span className="ss-label">ROI su concluse</span>
+                <span className="ss-value">
+                  {startupStats.roiPct != null ? <Badge value={startupStats.roiPct}/> : <span className="muted mono">—</span>}
+                </span>
+              </div>
+            </div>
+            <p className="hint-text" style={{ marginTop: 10 }}>
+              {startupStats.closed.length === 0
+                ? "Nessuna startup conclusa: P&L e ROI si calcolano su Exit e Fallimenti."
+                : startupStats.pnlTot >= 0
+                  ? `✅ Sulle ${startupStats.closed.length} startup concluse hai recuperato ${fmt(startupStats.recoveredTot)} a fronte di ${fmt(startupStats.closedCost)} di costo totale (commissioni incluse).`
+                  : `⚠ Sulle ${startupStats.closed.length} startup concluse hai recuperato ${fmt(startupStats.recoveredTot)} a fronte di ${fmt(startupStats.closedCost)} di costo totale (commissioni incluse): il capitale non è ancora rientrato.`}
+              {" "}Le startup attive ({fmt(startupStats.activeVal)}) sono valorizzate al costo nel patrimonio; le concluse ne escono.
+            </p>
+          </>
+        )}
+
         {startups.length === 0 ? (
           <EmptyState icon={Activity} title="Nessuna startup"
             description="Traccia gli investimenti in startup e fondi di venture capital. Inserisci l'importo investito e le eventuali commissioni."
@@ -1848,13 +2020,29 @@ const refreshGoldPrices = useCallback(async () => {
         ) : (
           <div className="table-wrap">
             <table className="data-table">
-              <thead><tr><th>Nome</th><th className="num">Importo investito</th><th className="num">Commissioni</th><th></th></tr></thead>
+              <thead>
+                <tr>
+                  <th>Nome</th><th>Stato</th>
+                  <th className="num">Investito</th><th className="num">Commissioni</th><th className="num">Costo totale</th>
+                  <th className="num">Recuperato</th><th className="num">P&amp;L</th><th className="num">ROI</th><th></th>
+                </tr>
+              </thead>
               <tbody>
-                {startups.map((s) => (
-                  <tr key={s.id}>
-                    <td>{s.name}</td>
+                {startupStats.rows.map((s) => (
+                  <tr key={s.id} className={s.closed ? "row-closed" : ""}>
+                    <td className="asset-name">
+                      {s.name}
+                      {s.exitNotes && <span className="note-mark" title={s.exitNotes}><Info size={12}/></span>}
+                    </td>
+                    <td><StatusTag status={s.status}/></td>
                     <td className="num mono"><strong>{fmt(s.invested)}</strong></td>
                     <td className="num mono">{fmt(s.fee)}</td>
+                    <td className="num mono">{fmt(s.totalCost)}</td>
+                    <td className="num mono">{s.recovered == null ? <span className="muted">—</span> : fmt(s.recovered)}</td>
+                    <td className={`num mono ${s.pnl == null ? "" : s.pnl >= 0 ? "pos-text" : "neg-text"}`}>
+                      {s.pnl == null ? <span className="muted">—</span> : <strong>{fmt(s.pnl)}</strong>}
+                    </td>
+                    <td className="num">{s.roiPct == null ? <span className="muted mono">—</span> : <Badge value={s.roiPct}/>}</td>
                     <td>
                       <div className="row-actions">
                         <button className="icon-btn" onClick={() => setStartupModal(s)}><Edit2 size={14}/></button>
@@ -1866,9 +2054,51 @@ const refreshGoldPrices = useCallback(async () => {
                   </tr>
                 ))}
               </tbody>
+              <tfoot>
+                <tr className="total-row">
+                  <td colSpan={2}><strong>Totale portafoglio startup</strong></td>
+                  <td className="num mono"><strong>{fmt(startupStats.investedTot)}</strong></td>
+                  <td className="num mono"><strong>{fmt(startupStats.feesTot)}</strong></td>
+                  <td className="num mono"><strong>{fmt(startupStats.costTot)}</strong></td>
+                  <td className="num mono"><strong>{fmt(startupStats.recoveredTot)}</strong></td>
+                  <td className="num mono" style={{ color: startupStats.pnlTot >= 0 ? "var(--green)" : "var(--red)" }}>
+                    <strong>{startupStats.closed.length > 0 ? fmt(startupStats.pnlTot) : "—"}</strong>
+                  </td>
+                  <td className="num">{startupStats.roiPct != null ? <Badge value={startupStats.roiPct}/> : <span className="muted mono">—</span>}</td>
+                  <td></td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         )}
+      </div>
+
+      {/* Config export/import */}
+      <div className="section-card">
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <h3 className="section-title" style={{ margin: 0 }}><Settings size={16}/> Configurazione portafoglio</h3>
+            <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              Il portafoglio viene <strong>salvato automaticamente sul server</strong> a ogni modifica.
+              Export/import JSON servono solo come backup o per migrare su un'altra installazione.
+            </p>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {configMsg && (
+              <span style={{ fontSize: 12, color: configMsg.type === "ok" ? "var(--green)" : "var(--red)" }}>
+                {configMsg.text}
+              </span>
+            )}
+            <input ref={configImportRef} type="file" accept=".json" style={{ display: "none" }}
+              onChange={(e) => { importConfig(e.target.files[0]); e.target.value = ""; }}/>
+            <button className="btn btn-ghost" onClick={() => configImportRef.current?.click()}>
+              <Upload size={15}/> Importa
+            </button>
+            <button className="btn btn-primary" onClick={exportConfig}>
+              <Download size={15}/> Esporta configurazione
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1934,26 +2164,26 @@ const refreshGoldPrices = useCallback(async () => {
           <KpiCard label="Guadagno previsto" value={fmt(projGain, true)} sub={`ROI stimato: ${projROI.toFixed(1)}%`}
             color={projGain >= 0 ? "green" : "red"}/>
         </div>
+        <div className="chart-legend">
+          <span className="cl-item"><span className="cl-swatch cl-swatch--band" style={{ background: palette[0] }}/>
+            Intervallo {Math.max(projReturn - 3, 0)}%–{projReturn + 3}%
+          </span>
+          <span className="cl-item"><span className="cl-swatch" style={{ background: palette[0] }}/>
+            Scenario base ({projReturn}%)
+          </span>
+        </div>
         <div style={{ height: 380 }}>
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={projData}>
-              <defs>
-                {[{ id: "gOpt", color: "#10b981" },{ id: "gBase", color: "#3b82f6" },{ id: "gPess", color: "#f59e0b" }].map(({ id, color }) => (
-                  <linearGradient key={id} id={id} x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={color} stopOpacity={0.2}/>
-                    <stop offset="95%" stopColor={color} stopOpacity={0}/>
-                  </linearGradient>
-                ))}
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>
-              <XAxis dataKey="year" label={{ value: "Anni", position: "insideBottom", offset: -4 }} tick={{ fontSize: 11 }} stroke="var(--text-muted)"/>
-              <YAxis tickFormatter={(v) => `€${(v/1000).toFixed(0)}k`} tick={{ fontSize: 11 }} stroke="var(--text-muted)"/>
-              <ReTooltip content={<CustomTooltip/>}/>
-              <Legend/>
-              <Area type="monotone" dataKey="optimistic" name={`Ottimistico (+${projReturn + 3}%)`} stroke="#10b981" fill="url(#gOpt)" strokeWidth={2} dot={false}/>
-              <Area type="monotone" dataKey="base"        name={`Base (${projReturn}%)`}              stroke="#3b82f6" fill="url(#gBase)" strokeWidth={2.5} dot={false}/>
-              <Area type="monotone" dataKey="pessimistic" name={`Pessimistico (${Math.max(projReturn - 3, 0)}%)`} stroke="#f59e0b" fill="url(#gPess)" strokeWidth={2} dot={false}/>
-            </AreaChart>
+            <ComposedChart data={projChartData} margin={{ top: 4, right: 16, left: 0, bottom: 8 }}>
+              <CartesianGrid stroke="var(--border)" vertical={false}/>
+              <XAxis dataKey="year" label={{ value: "Anni", position: "insideBottom", offset: -6 }} tick={{ fontSize: 11 }} stroke="var(--text-muted)"/>
+              <YAxis tickFormatter={(v) => `€${(v/1000).toFixed(0)}k`} tick={{ fontSize: 11 }} stroke="var(--text-muted)" width={60}/>
+              <ReTooltip content={<ProjectionTooltip projReturn={projReturn}/>}/>
+              <Area type="monotone" dataKey="range" name="Intervallo" stroke="none"
+                fill={palette[0]} fillOpacity={0.16} activeDot={false} isAnimationActive={false}/>
+              <Line type="monotone" dataKey="base" name="Scenario base" stroke={palette[0]} strokeWidth={2}
+                dot={false} activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--bg-card)" }}/>
+            </ComposedChart>
           </ResponsiveContainer>
         </div>
         <p className="hint-text">⚠ Proiezione ipotetica basata su rendimento costante. Non costituisce consulenza finanziaria.</p>
