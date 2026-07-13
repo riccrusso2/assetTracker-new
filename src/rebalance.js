@@ -2,6 +2,14 @@
 
 export const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 
+// Chiave di identità di un asset ATTRAVERSO gli snapshot. Volutamente NON `id`:
+// l'id è un uid casuale rigenerato se l'asset viene cancellato e riaggiunto, il
+// che spezzerebbe la serie storica in due e conterebbe il riacquisto come un
+// versamento. Il nome normalizzato è stabile. Slug perché finisce come dataKey
+// di Recharts, dove i punti sono path lookup.
+export const snapKey = (a) =>
+  (a.name || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || a.id;
+
 // Asset con target calcolato sul PATRIMONIO TOTALE (come l'oro) invece che
 // sul sotto-portafoglio ETF. Bitcoin ETP si compra come un ETF ma la sua
 // allocazione target è una % dell'intero patrimonio.
@@ -103,11 +111,11 @@ export const calcGrowthAttribution = (snapshots) => {
     const prev = snapshots[i - 1], cur = snapshots[i];
     const prevQ = {};
     let prevVal = 0;
-    (prev.assets || []).forEach((a) => { prevQ[a.id] = a.quantity || 0; prevVal += a.value || 0; });
+    (prev.assets || []).forEach((a) => { prevQ[snapKey(a)] = a.quantity || 0; prevVal += a.value || 0; });
     let curVal = 0, contrib = 0;
     (cur.assets || []).forEach((a) => {
       curVal  += a.value || 0;
-      contrib += ((a.quantity || 0) - (prevQ[a.id] || 0)) * (a.price || 0);
+      contrib += ((a.quantity || 0) - (prevQ[snapKey(a)] || 0)) * (a.price || 0);
     });
     rows.push({ label: cur.label, contrib: r2(contrib), market: r2(curVal - prevVal - contrib) });
   }
