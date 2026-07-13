@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import {
-  r2, isTotalTargetAsset, calcRebalancingTwoLevel, calcGrowthAttribution,
+  r2, snapKey, isTotalTargetAsset, calcRebalancingTwoLevel, calcGrowthAttribution,
   suStatus, calcStartupPortfolio,
 } from "./rebalance";
 import { apiFetch } from "./api";
@@ -186,16 +186,17 @@ const buildChartData = (snapshots) => {
   const base = snapshots[0];
   const baseTotal = base.totalValue || 1;
   const baseByAssetId = {};
-  (base.assets || []).forEach((a) => { baseByAssetId[a.id] = a.price || 1; });
+  (base.assets || []).forEach((a) => { baseByAssetId[snapKey(a)] = a.price || 1; });
   const assetIdSet = new Set();
-  snapshots.forEach((s) => (s.assets || []).forEach((a) => assetIdSet.add(a.id)));
+  snapshots.forEach((s) => (s.assets || []).forEach((a) => assetIdSet.add(snapKey(a))));
   const assetIds = [...assetIdSet];
   const data = snapshots.map((snap) => {
     const point = { label: snap.label };
     point["__total__"] = r2(((snap.totalValue || 0) / baseTotal) * 100);
     (snap.assets || []).forEach((a) => {
-      const b = baseByAssetId[a.id] || a.price || 1;
-      point[a.id] = r2(((a.price || 0) / b) * 100);
+      const k = snapKey(a);
+      const b = baseByAssetId[k] || a.price || 1;
+      point[k] = r2(((a.price || 0) / b) * 100);
     });
     return point;
   });
@@ -730,7 +731,7 @@ const SnapshotTooltip = ({ active, payload, label, snapshots }) => {
             <span style={{ fontWeight: 700 }}>{p.value?.toFixed(1)} <span style={{ color: "var(--text-muted)", fontSize: 11 }}>({snap ? fmt(snap.totalValue) : ""})</span></span>
           </div>
         );
-        const assetSnap = snap?.assets?.find((a) => a.id === p.dataKey);
+        const assetSnap = snap?.assets?.find((a) => snapKey(a) === p.dataKey);
         return (
           <div key={i} className="tooltip-row">
             <span style={{ color: p.color }}>{p.name}</span>
@@ -1118,11 +1119,11 @@ const refreshGoldPrices = useCallback(async () => {
   const assetNameMap = useMemo(() => {
   const m = {};
   assets.forEach((a) => {
-    m[a.id] = a.chartLabel || a.name.split(" ").slice(0, 3).join(" ");
+    m[snapKey(a)] = a.chartLabel || a.name.split(" ").slice(0, 3).join(" ");
   });
 
   if (goldEtf.identifier) {
-    m[goldEtf.id] = goldEtf.name.split(" ").slice(0, 3).join(" ");
+    m[snapKey(goldEtf)] = goldEtf.name.split(" ").slice(0, 3).join(" ");
   }
 
   return m;
