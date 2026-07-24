@@ -173,6 +173,9 @@ app.post("/api/snapshot", requireAuth, async (req, res) => {
       const row = {
         user_id: req.userId, label: snap.label, year: snap.year, month: snap.month,
         total_value: snap.totalValue ?? 0, assets: snap.assets,
+        // Senza questo l'upsert lascia saved_at al valore del primo insert:
+        // la riga viene aggiornata ma sembra vecchia di mesi.
+        saved_at: new Date().toISOString(),
       };
       const { error } = await supabase
         .from("snapshots").upsert(row, { onConflict: "user_id,year,month" });
