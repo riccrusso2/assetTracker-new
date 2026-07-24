@@ -851,6 +851,7 @@ export default function App({ session } = {}) {
   // (es. server irraggiungibile). Niente più import/export manuale.
   const [configLoaded, setConfigLoaded] = useState(false);
   const [lastSaved,    setLastSaved]    = useState(null);
+  const [saveErr,      setSaveErr]      = useState(null);
 
   useEffect(() => {
     apiFetch("/api/config")
@@ -1244,20 +1245,26 @@ const refreshGoldPrices = useCallback(async () => {
             totalCash, assets, startups, assetClasses, goldEtf, physGold, settings,
           }),
         });
-        if (!res.ok) return;
+        if (!res.ok) throw new Error(`config HTTP ${res.status}`);
         setLastSaved(new Date());
 
         // Auto-snapshot mese corrente (solo se ci sono prezzi)
         const snap = buildSnapshot();
         if (snap.assets.length > 0) {
-          await apiFetch("/api/snapshot", {
+          const sres = await apiFetch("/api/snapshot", {
             method: "POST", headers: { "Content-Type": "application/json" },
             body: JSON.stringify(snap),
           });
+          if (!sres.ok) throw new Error(`snapshot HTTP ${sres.status}`);
           const updated = await apiFetch("/api/snapshots").then((r) => r.json());
           if (Array.isArray(updated)) setSnapshots(updated);
         }
-      } catch { /* offline: localStorage fa da cache */ }
+        setSaveErr(null);
+      } catch (e) {
+        // Prima era un catch muto: un 401 (token scaduto) o un 500 passavano
+        // inosservati e l'utente credeva di aver salvato.
+        setSaveErr(e.message || "salvataggio fallito");
+      }
     }, 1500);
     return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2367,10 +2374,13 @@ const refreshGoldPrices = useCallback(async () => {
             <h1 className="app-title">Portfolio Tracker</h1>
             <p className="app-subtitle">
               <Info size={12}/> Aggiornamento automatico ogni 15 min
-              {lastSaved && (
+              {lastSaved && !saveErr && (
                 <span style={{ color: "var(--green)" }}>
                   · Salvato {lastSaved.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })}
                 </span>
+              )}
+              {saveErr && (
+                <span style={{ color: "var(--red)" }}>· ⚠ Non salvato: {saveErr}</span>
               )}
               {isLoading && (
                 <span className="loading-dot-row">
