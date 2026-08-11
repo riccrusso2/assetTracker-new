@@ -113,4 +113,25 @@ describe("proprietario autenticato", () => {
     expect(screen.queryByText(/sola lettura/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /impostazioni/i })).toBeInTheDocument();
   }, 10000);
+
+  // Regressione: un GET /api/config fallito veniva trattato come "nessun
+  // portafoglio", lo stato veniva azzerato e l'auto-save sovrascriveva il blob
+  // sul server con uno vuoto. Il caricamento fallito non deve mai scrivere.
+  test("GET /api/config fallito non innesca nessun salvataggio", async () => {
+    apiFetch.mockImplementation((path) => {
+      if (path === "/api/config") return Promise.resolve({ ok: false, status: 500, json: async () => ({}) });
+      if (path === "/api/snapshots") return ok([]);
+      return ok({});
+    });
+
+    render(<App session={{ user: { id: "u1", email: "a@b.c" } }} />);
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith("/api/config"));
+
+    // Oltre il debounce di 1,5 s dell'auto-save.
+    await new Promise((r) => setTimeout(r, 2200));
+
+    const writes = apiFetch.mock.calls.filter(([, o]) => o?.method && o.method !== "GET");
+    expect(writes).toHaveLength(0);
+    expect(await screen.findByText(/portafoglio non caricato/i)).toBeInTheDocument();
+  }, 10000);
 });

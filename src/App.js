@@ -995,7 +995,13 @@ export default function App({ session, shareToken } = {}) {
           if (Array.isArray(payload.snapshots)) setSnapshots(payload.snapshots);
           return payload.config;
         })
-      : apiFetch("/api/config").then((r) => (r.ok ? r.json() : null));
+      // Un GET fallito NON è "nessun portafoglio": prima veniva mappato a null,
+      // lo stato veniva azzerato e l'auto-save sovrascriveva il blob buono con
+      // uno vuoto. Ora l'errore risale al catch e l'auto-save non si arma.
+      : apiFetch("/api/config").then((r) => {
+          if (!r.ok) throw new Error(`config HTTP ${r.status}`);
+          return r.json();
+        });
 
     load
       .then((cfg) => {
@@ -1025,12 +1031,19 @@ export default function App({ session, shareToken } = {}) {
           setSettings(DEFAULT_SETTINGS);
         }
       })
+      // configLoaded arma l'auto-save: si imposta SOLO se il caricamento è
+      // riuscito. Su errore si resta in sola lettura di fatto, con la cache
+      // locale a schermo, finché l'utente non ricarica.
+      .then(() => { if (!readOnly) setConfigLoaded(true); })
       .catch((e) => {
-        if (readOnly) setShareErr(e.message === "share"
-          ? "Questo link non è valido o la condivisione è stata disattivata."
-          : "Impossibile caricare il portafoglio condiviso.");
-      })
-      .finally(() => setConfigLoaded(true));
+        if (readOnly) {
+          setShareErr(e.message === "share"
+            ? "Questo link non è valido o la condivisione è stata disattivata."
+            : "Impossibile caricare il portafoglio condiviso.");
+        } else {
+          setSaveErr(`portafoglio non caricato (${e.message}) — ricarica la pagina`);
+        }
+      });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
