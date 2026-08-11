@@ -13,7 +13,7 @@ import {
   Edit2, Moon, Sun, Download, Search, X, AlertTriangle,
   Activity, LayoutDashboard, Briefcase, Plus, CheckCircle,
   Shield, ChevronUp, ChevronDown, Wallet, Camera, Upload,
-  Settings, Tag, LogOut,
+  Settings, Tag, LogOut, Share2, Copy, Eye, Link2,
 } from "lucide-react";
 import "./styles.css";
 import {
@@ -520,6 +520,9 @@ const StartupModal = ({ startup, onSave, onClose }) => {
       // Exit: importo incassato + note. Fallita/Attiva: campi ripuliti.
       exitAmount: status === "exit" ? (parseFloat(form.exitAmount) || 0) : undefined,
       exitNotes:  status === "exit" ? (form.exitNotes || "").trim() || undefined : undefined,
+      // Attiva: valutazione odierna opzionale (round successivi).
+      currentValue: status === "active" && `${form.currentValue ?? ""}` !== ""
+        ? parseFloat(form.currentValue) || 0 : undefined,
     });
     onClose();
   };
@@ -547,6 +550,12 @@ const StartupModal = ({ startup, onSave, onClose }) => {
               ))}
             </select>
           </label>
+          {form.status === "active" && (
+            <label className="field-label">Valutazione attuale (€) — opzionale
+              <input type="number" step="any" value={form.currentValue ?? ""} onChange={(e) => set("currentValue", e.target.value)} className="field-input"
+                placeholder="Lascia vuoto per valorizzare al costo"/>
+            </label>
+          )}
           {form.status === "exit" && (
             <>
               <label className="field-label">Importo incassato dall'exit (€) *
@@ -744,6 +753,122 @@ const SnapshotTooltip = ({ active, payload, label, snapshots }) => {
   );
 };
 
+// ====================== SHARE MODAL ======================
+// Gestisce il link pubblico read-only: crea/riusa il token, copia negli
+// appunti, revoca. Lo stato reale vive sul server (/api/share).
+const ShareModal = ({ onClose }) => {
+  const [state,   setState]   = useState(null);   // { enabled, token }
+  const [loading, setLoading] = useState(true);
+  const [err,     setErr]     = useState(null);
+  const [copied,  setCopied]  = useState(false);
+
+  const call = useCallback(async (method) => {
+    setLoading(true);
+    setErr(null);
+    try {
+      const res = await apiFetch("/api/share", { method });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setState(await res.json());
+    } catch (e) {
+      setErr(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { call("GET"); }, [call]);
+
+  const url = state?.token ? `${window.location.origin}/p/${state.token}` : null;
+
+  const copy = async () => {
+    if (!url) return;
+    try {
+      // clipboard API richiede contesto sicuro: fallback su textarea + execCommand.
+      if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(url);
+      else {
+        const ta = document.createElement("textarea");
+        ta.value = url;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2500);
+    } catch {
+      setErr("Copia non riuscita: seleziona e copia il link manualmente.");
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
+        <div className="modal-header">
+          <h3><Share2 size={16} style={{ marginRight: 8 }}/> Condividi portafoglio</h3>
+          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+        </div>
+        <div className="modal-body">
+          <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+            Chi riceve il link vede il tuo portafoglio in <strong>sola lettura</strong>,
+            senza doversi registrare. Nessuno può modificare, aggiungere o eliminare dati.
+          </p>
+
+          {err && (
+            <div className="alert alert-red" style={{ marginBottom: 0 }}>
+              <AlertTriangle size={14}/> {err}
+            </div>
+          )}
+
+          {loading && <p className="muted" style={{ fontSize: 13 }}>Caricamento…</p>}
+
+          {!loading && state?.enabled && url && (
+            <>
+              <label className="field-label">
+                Link pubblico
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <input className="field-input" readOnly value={url}
+                    onFocus={(e) => e.target.select()} style={{ flex: 1, minWidth: 0 }}/>
+                  <button className="btn btn-primary" onClick={copy} style={{ flexShrink: 0 }}>
+                    {copied ? <CheckCircle size={14}/> : <Copy size={14}/>}
+                    {copied ? "Copiato" : "Copia"}
+                  </button>
+                </div>
+              </label>
+              {copied && (
+                <span style={{ fontSize: 12, color: "var(--green)" }}>✓ Link copiato negli appunti</span>
+              )}
+              <p className="hint-text" style={{ margin: 0 }}>
+                Il link contiene un codice casuale non indovinabile. Puoi disattivarlo
+                quando vuoi: il vecchio link smette subito di funzionare.
+              </p>
+            </>
+          )}
+
+          {!loading && !state?.enabled && (
+            <p className="muted" style={{ fontSize: 13 }}>
+              La condivisione è disattivata. Genera un link per abilitarla.
+            </p>
+          )}
+        </div>
+        <div className="modal-footer">
+          {state?.enabled ? (
+            <button className="btn btn-ghost" onClick={() => call("DELETE")} disabled={loading}>
+              <X size={14}/> Disattiva condivisione
+            </button>
+          ) : (
+            <button className="btn btn-primary" onClick={() => call("POST")} disabled={loading}>
+              <Link2 size={14}/> Genera link
+            </button>
+          )}
+          <button className="btn btn-ghost" onClick={onClose}>Chiudi</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ====================== HOOKS ======================
 const useLS = (key, init, uid) => {
   const fullKey = uid ? `${key}::${uid}` : key;
@@ -787,10 +912,14 @@ const TABS = [
 ];
 
 // ====================== MAIN APP ======================
-export default function App({ session } = {}) {
+export default function App({ session, shareToken } = {}) {
   // ---- State ----
-  // uid: namespacing della cache locale per utente (multi-user su stesso browser)
-  const uid = session?.user?.id;
+  // shareToken presente → vista pubblica read-only (nessuna auth, nessuna scrittura).
+  const readOnly = !!shareToken;
+  // uid: namespacing della cache locale per utente (multi-user su stesso browser).
+  // In vista condivisa il namespace è il token: i dati altrui non sporcano la
+  // cache del proprietario che apre il link nello stesso browser.
+  const uid = shareToken ? `share_${shareToken}` : session?.user?.id;
   const [dark,         setDark]    = useLS(STORAGE_KEYS.DARK_MODE, true, uid);
   const [assets,       setAssets]  = useLS(STORAGE_KEYS.ASSETS, [], uid);
   const [startups,     setSU]      = useLS(STORAGE_KEYS.STARTUP, [], uid);
@@ -814,6 +943,7 @@ export default function App({ session } = {}) {
   const [goldEtfModal,  setGoldEtfModal] = useState(false);
   const [physGoldModal, setPhysGoldModal]= useState(false);
   const [acModal,       setACModal]      = useState(false);
+  const [shareModal,    setShareModal]   = useState(false);
   const [editCash,      setEditCash]     = useState(false);
   const [cashInput,     setCashInput]    = useState("");
   const [configMsg,     setConfigMsg]    = useState(null);
@@ -838,12 +968,14 @@ export default function App({ session } = {}) {
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
   }, [dark]);
 
-  // Load snapshots from server
+  // Load snapshots from server (in vista condivisa arrivano da /api/public)
   useEffect(() => {
+    if (readOnly) return;
     apiFetch("/api/snapshots")
       .then((r) => r.json())
       .then((data) => { if (Array.isArray(data)) setSnapshots(data); })
       .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ---- Config: il server è la fonte di verità ----
@@ -852,10 +984,20 @@ export default function App({ session } = {}) {
   const [configLoaded, setConfigLoaded] = useState(false);
   const [lastSaved,    setLastSaved]    = useState(null);
   const [saveErr,      setSaveErr]      = useState(null);
+  const [shareErr,     setShareErr]     = useState(null); // link pubblico non valido
 
   useEffect(() => {
-    apiFetch("/api/config")
-      .then((r) => (r.ok ? r.json() : null))
+    // Vista condivisa: un'unica GET pubblica restituisce config + snapshot.
+    const load = readOnly
+      ? apiFetch(`/api/public/${encodeURIComponent(shareToken)}`).then(async (r) => {
+          if (!r.ok) throw new Error("share");
+          const payload = await r.json();
+          if (Array.isArray(payload.snapshots)) setSnapshots(payload.snapshots);
+          return payload.config;
+        })
+      : apiFetch("/api/config").then((r) => (r.ok ? r.json() : null));
+
+    load
       .then((cfg) => {
         if (cfg && Array.isArray(cfg.assets)) {
           setAssets(cfg.assets);
@@ -883,7 +1025,11 @@ export default function App({ session } = {}) {
           setSettings(DEFAULT_SETTINGS);
         }
       })
-      .catch(() => {})
+      .catch((e) => {
+        if (readOnly) setShareErr(e.message === "share"
+          ? "Questo link non è valido o la condivisione è stata disattivata."
+          : "Impossibile caricare il portafoglio condiviso.");
+      })
       .finally(() => setConfigLoaded(true));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -915,7 +1061,7 @@ export default function App({ session } = {}) {
         : r2(price18kt),
     lastUpdated: data.updatedAt ?? new Date().toISOString(),
   }));
-}, []);
+}, [setPhysGold]);
 
 const refreshGoldPrices = useCallback(async () => {
   setGoldLoading(true);
@@ -948,7 +1094,7 @@ const refreshGoldPrices = useCallback(async () => {
   } finally {
     setGoldLoading(false);
   }
-}, [fetchOne, fetchGoldSpotPrice]);
+}, [fetchOne, fetchGoldSpotPrice, setGoldEtf]);
 
   // ---- Derived ----
   const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
@@ -990,11 +1136,13 @@ const refreshGoldPrices = useCallback(async () => {
 
   // Le startup concluse (exit/failed) escono dal patrimonio: l'incasso di un'exit
   // va registrato manualmente in liquidità.
-  const startupStats = useMemo(() => calcStartupPortfolio(startups), [startups]);
+  const startupStats = useMemo(
+    () => calcStartupPortfolio(startups, settings.startupSubscription ?? 0),
+    [startups, settings.startupSubscription]);
 
   const suTotal    = startupStats.activeVal;   // solo startup attive → patrimonio
   const suFees     = startupStats.feesTot;
-  const suAbbonamenti = settings.startupSubscription ?? 0;
+  const suAbbonamenti = startupStats.subscription;
   const grandTotal = totals.val + totalCash + physGoldValue + suTotal;
 
   // Variazione patrimonio vs ultimo snapshot chiuso (mese corrente escluso: è auto-aggiornato).
@@ -1169,10 +1317,13 @@ const refreshGoldPrices = useCallback(async () => {
     }
 
     await Promise.all(tasks);
-  }, [fetchOne, setAssets]);
+  }, [fetchOne, setAssets, setGoldEtf]);
 
   const intervalRef = useRef(null);
   useEffect(() => {
+    // Read-only: si mostrano i prezzi salvati dal proprietario, niente refresh
+    // (aggiornerebbe lo stato locale mostrando dati che il proprietario non ha).
+    if (readOnly) return;
     if (assets.length > 0 || goldEtf.identifier) fetchAllPrices();
     // Try to refresh physical gold spot on load too
     fetchGoldSpotPrice().catch(() => {});
@@ -1235,7 +1386,8 @@ const refreshGoldPrices = useCallback(async () => {
   // In più aggiorna in automatico lo snapshot del mese corrente (upsert per mese/anno),
   // così lo storico si costruisce da solo: apri, aggiorni, chiudi.
   useEffect(() => {
-    if (!configLoaded) return;
+    // In vista condivisa non si scrive mai: nessun auto-save, nessun snapshot.
+    if (!configLoaded || readOnly) return;
     const t = setTimeout(async () => {
       try {
         const res = await apiFetch("/api/config", {
@@ -1335,7 +1487,8 @@ const refreshGoldPrices = useCallback(async () => {
     } catch (e) {
       showCfgMsg("err", `Errore: ${e.message}`);
     }
-  }, []);
+    // I setter di useLS sono setter di useState: identità stabile, deps innocue.
+  }, [setAssets, setSU, setCash, setAC, setGoldEtf, setPhysGold]);
 
   const showCfgMsg = (type, text) => {
     setConfigMsg({ type, text });
@@ -1362,6 +1515,9 @@ const refreshGoldPrices = useCallback(async () => {
 
   const isEmpty = assets.length === 0 && goldTotal === 0 && startups.length === 0 && totalCash === 0;
 
+  // Le impostazioni sono personali e modificabili: fuori dalla vista condivisa.
+  const visibleTabs = readOnly ? TABS.filter((t) => t.id !== "settings") : TABS;
+
   // ====================== TAB: OVERVIEW ======================
   const renderOverview = () => (
     <div className="tab-content">
@@ -1373,9 +1529,11 @@ const refreshGoldPrices = useCallback(async () => {
             Inizia aggiungendo i tuoi investimenti dalla sezione <strong>Portafoglio</strong>.
             Puoi aggiungere ETF, azioni, startup, oro e liquidità.
           </p>
-          <button className="btn btn-primary" onClick={() => { setTab("portfolio"); setAssetModal({}); }} style={{ fontSize: 15, padding: "10px 24px" }}>
-            <Plus size={16}/> Inizia ad aggiungere asset
-          </button>
+          {!readOnly && (
+            <button className="btn btn-primary" onClick={() => { setTab("portfolio"); setAssetModal({}); }} style={{ fontSize: 15, padding: "10px 24px" }}>
+              <Plus size={16}/> Inizia ad aggiungere asset
+            </button>
+          )}
           <div className="welcome-features">
             <div className="wf-item"><span>📈</span> Prezzi live via JustETF</div>
             <div className="wf-item"><span>💰</span> Prezzo oro 18kt live</div>
@@ -1409,15 +1567,17 @@ const refreshGoldPrices = useCallback(async () => {
               sub={goldTotal > 0 && grandTotal > 0 ? `${((goldTotal / grandTotal) * 100).toFixed(1)}% del patrimonio` : null}
               trend={goldEtfPerfPct}/>
             <KpiCard compact label="Startup attive" value={fmt(suTotal, true)} icon={Briefcase}
-              color={startupStats.closed.length > 0 && startupStats.pnlTot < 0 ? "red" : "blue"}
+              color={startupStats.roiOverallPct != null && startupStats.roiOverallPct < 0 ? "red" : "blue"}
               sub={`Commissioni: ${fmt(suFees)} · Abbonamento: ${fmt(suAbbonamenti)}`}
-              footer={startupStats.closed.length > 0 && (
+              footer={startups.length > 0 && (
                 <div className="kpi-sub" style={{ marginTop: 6 }}>
-                  Realizzato:{" "}
-                  <strong style={{ color: startupStats.pnlTot >= 0 ? "var(--green)" : "var(--red)" }}>
-                    {fmt(startupStats.pnlTot)}
-                  </strong>{" "}
-                  su {startupStats.closed.length} conclus{startupStats.closed.length === 1 ? "a" : "e"}
+                  {startupStats.allClosed ? "Risultato finale" : "Complessivo"}:{" "}
+                  <strong style={{ color: startupStats.pnlOverall >= 0 ? "var(--green)" : "var(--red)" }}>
+                    {fmt(startupStats.pnlOverall)}
+                  </strong>
+                  {startupStats.closed.length > 0 && (
+                    <> · realizzato {fmt(startupStats.pnlTot)} su {startupStats.closed.length} conclus{startupStats.closed.length === 1 ? "a" : "e"}</>
+                  )}
                 </div>
               )}/>
           </div>
@@ -1492,18 +1652,22 @@ const refreshGoldPrices = useCallback(async () => {
                       {snapshotMsg.text}
                     </span>
                   )}
-                  <input ref={importSnapshotsRef} type="file" accept=".json" style={{ display: "none" }}
-                    onChange={(e) => { importSnapshots(e.target.files[0]); e.target.value = ""; }}/>
-                  <button className="btn btn-ghost" onClick={() => importSnapshotsRef.current?.click()} style={{ fontSize: 12, padding: "6px 12px" }}>
-                    <Upload size={13}/> Importa
-                  </button>
-                  <button className="btn btn-ghost" onClick={exportSnapshotsFile} disabled={snapshots.length === 0} style={{ fontSize: 12, padding: "6px 12px" }}>
-                    <Download size={13}/> Esporta{snapshots.length > 0 ? ` (${snapshots.length})` : ""}
-                  </button>
-                  <button className="btn btn-primary" onClick={saveMonthlySnapshot}
-                    disabled={snapshotSaving || isLoading || assets.length === 0} style={{ fontSize: 12, padding: "6px 12px" }}>
-                    <Camera size={13}/> {snapshotSaving ? "Salvataggio…" : "Snapshot mensile"}
-                  </button>
+                  {!readOnly && (
+                    <>
+                      <input ref={importSnapshotsRef} type="file" accept=".json" style={{ display: "none" }}
+                        onChange={(e) => { importSnapshots(e.target.files[0]); e.target.value = ""; }}/>
+                      <button className="btn btn-ghost" onClick={() => importSnapshotsRef.current?.click()} style={{ fontSize: 12, padding: "6px 12px" }}>
+                        <Upload size={13}/> Importa
+                      </button>
+                      <button className="btn btn-ghost" onClick={exportSnapshotsFile} disabled={snapshots.length === 0} style={{ fontSize: 12, padding: "6px 12px" }}>
+                        <Download size={13}/> Esporta{snapshots.length > 0 ? ` (${snapshots.length})` : ""}
+                      </button>
+                      <button className="btn btn-primary" onClick={saveMonthlySnapshot}
+                        disabled={snapshotSaving || isLoading || assets.length === 0} style={{ fontSize: 12, padding: "6px 12px" }}>
+                        <Camera size={13}/> {snapshotSaving ? "Salvataggio…" : "Snapshot mensile"}
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
               {snapshotChartData.length === 0 ? (
@@ -1636,7 +1800,7 @@ const refreshGoldPrices = useCallback(async () => {
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <h2 className="section-title" style={{ margin: 0 }}><Wallet size={16}/> Liquidità</h2>
           {!editCash ? (
-            <button className="icon-btn" onClick={() => { setCashInput(totalCash); setEditCash(true); }}><Edit2 size={14}/></button>
+            !readOnly && <button className="icon-btn" onClick={() => { setCashInput(totalCash); setEditCash(true); }}><Edit2 size={14}/></button>
           ) : (
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <input type="number" step="any" value={cashInput} onChange={(e) => setCashInput(e.target.value)}
@@ -1650,7 +1814,11 @@ const refreshGoldPrices = useCallback(async () => {
         </div>
         {!editCash && (
           <div style={{ fontSize: "1.6rem", fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", marginTop: 8 }}>
-            {totalCash > 0 ? fmt(totalCash) : <span className="muted" style={{ fontSize: "1rem" }}>Clicca la matita per inserire la liquidità</span>}
+            {totalCash > 0
+              ? fmt(totalCash)
+              : <span className="muted" style={{ fontSize: "1rem" }}>
+                  {readOnly ? "Nessuna liquidità registrata" : "Clicca la matita per inserire la liquidità"}
+                </span>}
           </div>
         )}
       </div>
@@ -1663,9 +1831,11 @@ const refreshGoldPrices = useCallback(async () => {
             {assetTotals.val > 0 && <span className="muted" style={{ fontSize: 13 }}>Totale: <strong>{fmt(assetTotals.val)}</strong></span>}
           </div>
           <div className="btn-row">
-            <button className="btn btn-ghost" onClick={() => setACModal(true)} title="Gestisci asset class">
-              <Tag size={15}/> Asset class
-            </button>
+            {!readOnly && (
+              <button className="btn btn-ghost" onClick={() => setACModal(true)} title="Gestisci asset class">
+                <Tag size={15}/> Asset class
+              </button>
+            )}
             {assets.length > 0 && (
               <div className="search-wrap" style={{ maxWidth: 260 }}>
                 <Search size={15} className="search-icon"/>
@@ -1676,14 +1846,18 @@ const refreshGoldPrices = useCallback(async () => {
             {assets.length > 0 && (
               <button className="btn btn-ghost" onClick={() => exportCSV(assets)}><Download size={15}/> CSV</button>
             )}
-            <button className="btn btn-primary" onClick={() => setAssetModal({})}><Plus size={15}/> Aggiungi asset</button>
+            {!readOnly && (
+              <button className="btn btn-primary" onClick={() => setAssetModal({})}><Plus size={15}/> Aggiungi asset</button>
+            )}
           </div>
         </div>
 
         {assets.length === 0 ? (
           <EmptyState icon={Briefcase} title="Nessun asset ancora"
-            description="Aggiungi ETF, azioni o altri strumenti finanziari quotati. Il prezzo sarà aggiornato automaticamente se inserisci un ISIN valido."
-            action={<button className="btn btn-primary" onClick={() => setAssetModal({})}><Plus size={15}/> Aggiungi il primo asset</button>}/>
+            description={readOnly
+              ? "Questo portafoglio non contiene asset quotati."
+              : "Aggiungi ETF, azioni o altri strumenti finanziari quotati. Il prezzo sarà aggiornato automaticamente se inserisci un ISIN valido."}
+            action={readOnly ? null : <button className="btn btn-primary" onClick={() => setAssetModal({})}><Plus size={15}/> Aggiungi il primo asset</button>}/>
         ) : (
           <>
             <div className="table-wrap">
@@ -1735,12 +1909,14 @@ const refreshGoldPrices = useCallback(async () => {
                         </td>
                         <td><span className="class-tag">{a.assetClass}</span></td>
                         <td>
-                          <div className="row-actions">
-                            <button className="icon-btn" onClick={() => setAssetModal(a)}><Edit2 size={14}/></button>
-                            <button className="icon-btn danger" onClick={() => { if (window.confirm(`Rimuovere ${a.name}?`)) deleteAsset(a.id); }}>
-                              <Trash2 size={14}/>
-                            </button>
-                          </div>
+                          {!readOnly && (
+                            <div className="row-actions">
+                              <button className="icon-btn" onClick={() => setAssetModal(a)}><Edit2 size={14}/></button>
+                              <button className="icon-btn danger" onClick={() => { if (window.confirm(`Rimuovere ${a.name}?`)) deleteAsset(a.id); }}>
+                                <Trash2 size={14}/>
+                              </button>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     );
@@ -1775,15 +1951,17 @@ const refreshGoldPrices = useCallback(async () => {
               </div>
             )}
           </div>
-          <button
-            className="btn btn-ghost"
-            onClick={refreshGoldPrices}
-            disabled={goldLoading || isLoading}
-            style={{ fontSize: 13 }}
-          >
-            <RefreshCw size={14} className={(goldLoading || loading[goldEtf.id]) ? "spin" : ""}/>
-            {goldLoading ? "Aggiornamento…" : "Aggiorna prezzi oro"}
-          </button>
+          {!readOnly && (
+            <button
+              className="btn btn-ghost"
+              onClick={refreshGoldPrices}
+              disabled={goldLoading || isLoading}
+              style={{ fontSize: 13 }}
+            >
+              <RefreshCw size={14} className={(goldLoading || loading[goldEtf.id]) ? "spin" : ""}/>
+              {goldLoading ? "Aggiornamento…" : "Aggiorna prezzi oro"}
+            </button>
+          )}
         </div>
 
         {goldPriceErr && (
@@ -1799,9 +1977,11 @@ const refreshGoldPrices = useCallback(async () => {
         <div style={{ marginBottom: 20 }}>
           <div className="gold-sub-header">
             <span className="gold-sub-label">ETF Oro quotato</span>
-            <button className="icon-btn" onClick={() => setGoldEtfModal(true)} title="Configura ETF oro">
-              <Edit2 size={14}/>
-            </button>
+            {!readOnly && (
+              <button className="icon-btn" onClick={() => setGoldEtfModal(true)} title="Configura ETF oro">
+                <Edit2 size={14}/>
+              </button>
+            )}
           </div>
 
           {!goldEtf.identifier ? (
@@ -1810,12 +1990,14 @@ const refreshGoldPrices = useCallback(async () => {
               borderRadius: "var(--radius-sm)", color: "var(--amber)" }}>
               <AlertTriangle size={14}/>
               <span style={{ fontSize: 13 }}>
-                Configura l'ETF oro inserendo ISIN e quantità.
+                {readOnly ? "Nessun ETF oro configurato." : "Configura l'ETF oro inserendo ISIN e quantità."}
               </span>
-              <button className="btn btn-ghost" style={{ marginLeft: "auto", padding: "4px 12px", fontSize: 12 }}
-                onClick={() => setGoldEtfModal(true)}>
-                Configura
-              </button>
+              {!readOnly && (
+                <button className="btn btn-ghost" style={{ marginLeft: "auto", padding: "4px 12px", fontSize: 12 }}
+                  onClick={() => setGoldEtfModal(true)}>
+                  Configura
+                </button>
+              )}
             </div>
           ) : (
             <>
@@ -1884,9 +2066,11 @@ const refreshGoldPrices = useCallback(async () => {
         <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
           <div className="gold-sub-header">
             <span className="gold-sub-label">Oro fisico 18kt</span>
-            <button className="icon-btn" onClick={() => setPhysGoldModal(true)} title="Modifica oro fisico">
-              <Edit2 size={14}/>
-            </button>
+            {!readOnly && (
+              <button className="icon-btn" onClick={() => setPhysGoldModal(true)} title="Modifica oro fisico">
+                <Edit2 size={14}/>
+              </button>
+            )}
           </div>
 
           {physGold.grams === 0 ? (
@@ -1894,12 +2078,14 @@ const refreshGoldPrices = useCallback(async () => {
               background: "var(--bg-card2)", border: "1px dashed var(--border)",
               borderRadius: "var(--radius-sm)", color: "var(--text-muted)" }}>
               <span style={{ fontSize: 13 }}>
-                Nessun oro fisico registrato. Clicca la matita per inserire la grammatura.
+                Nessun oro fisico registrato.{!readOnly && " Clicca la matita per inserire la grammatura."}
               </span>
-              <button className="btn btn-ghost" style={{ marginLeft: "auto", padding: "4px 12px", fontSize: 12 }}
-                onClick={() => setPhysGoldModal(true)}>
-                Aggiungi
-              </button>
+              {!readOnly && (
+                <button className="btn btn-ghost" style={{ marginLeft: "auto", padding: "4px 12px", fontSize: 12 }}
+                  onClick={() => setPhysGoldModal(true)}>
+                  Aggiungi
+                </button>
+              )}
             </div>
           ) : (
             <>
@@ -1968,10 +2154,13 @@ const refreshGoldPrices = useCallback(async () => {
                 <span>Attive: <strong>{startupStats.active.length}</strong></span>
                 <span>Concluse: <strong>{startupStats.closed.length}</strong></span>
                 <span>Abbonamento: <strong>{fmt(suAbbonamenti)}</strong></span>
+                <span>Esborso: <strong>{fmt(startupStats.totalOutlay)}</strong></span>
               </div>
             )}
           </div>
-          <button className="btn btn-primary" onClick={() => setStartupModal({})}><Plus size={15}/> Aggiungi startup</button>
+          {!readOnly && (
+            <button className="btn btn-primary" onClick={() => setStartupModal({})}><Plus size={15}/> Aggiungi startup</button>
+          )}
         </div>
 
         {startups.length > 0 && (
@@ -1986,8 +2175,12 @@ const refreshGoldPrices = useCallback(async () => {
                 <span className="ss-value mono">{fmt(startupStats.feesTot)}</span>
               </div>
               <div className="ss-item">
-                <span className="ss-label">Costo totale</span>
-                <span className="ss-value mono">{fmt(startupStats.costTot)}</span>
+                <span className="ss-label">Abbonamento</span>
+                <span className="ss-value mono">{fmt(startupStats.subscription)}</span>
+              </div>
+              <div className="ss-item">
+                <span className="ss-label">Esborso totale</span>
+                <span className="ss-value mono">{fmt(startupStats.totalOutlay)}</span>
               </div>
               <div className="ss-item">
                 <span className="ss-label">Recuperato da exit</span>
@@ -1997,34 +2190,47 @@ const refreshGoldPrices = useCallback(async () => {
                 <span className="ss-label">Perdite da fallimenti</span>
                 <span className="ss-value mono neg-text">{startupStats.failedLoss > 0 ? `−${fmt(startupStats.failedLoss)}` : fmt(0)}</span>
               </div>
-              <div className="ss-item ss-item--strong">
+              <div className="ss-item">
                 <span className="ss-label">P&amp;L realizzato</span>
                 <span className="ss-value mono" style={{ color: startupStats.pnlTot >= 0 ? "var(--green)" : "var(--red)" }}>
                   {startupStats.closed.length > 0 ? fmt(startupStats.pnlTot) : "—"}
                 </span>
               </div>
               <div className="ss-item ss-item--strong">
-                <span className="ss-label">ROI su concluse</span>
+                <span className="ss-label">{startupStats.allClosed ? "Risultato finale" : "P&L complessivo"}</span>
+                <span className="ss-value mono" style={{ color: startupStats.pnlOverall >= 0 ? "var(--green)" : "var(--red)" }}>
+                  {fmt(startupStats.pnlOverall)}
+                </span>
+              </div>
+              <div className="ss-item ss-item--strong">
+                <span className="ss-label">{startupStats.allClosed ? "ROI finale" : "ROI complessivo"}</span>
                 <span className="ss-value">
-                  {startupStats.roiPct != null ? <Badge value={startupStats.roiPct}/> : <span className="muted mono">—</span>}
+                  {startupStats.roiOverallPct != null ? <Badge value={startupStats.roiOverallPct}/> : <span className="muted mono">—</span>}
                 </span>
               </div>
             </div>
             <p className="hint-text" style={{ marginTop: 10 }}>
-              {startupStats.closed.length === 0
-                ? "Nessuna startup conclusa: P&L e ROI si calcolano su Exit e Fallimenti."
-                : startupStats.pnlTot >= 0
-                  ? `✅ Sulle ${startupStats.closed.length} startup concluse hai recuperato ${fmt(startupStats.recoveredTot)} a fronte di ${fmt(startupStats.closedCost)} di costo totale (commissioni incluse).`
-                  : `⚠ Sulle ${startupStats.closed.length} startup concluse hai recuperato ${fmt(startupStats.recoveredTot)} a fronte di ${fmt(startupStats.closedCost)} di costo totale (commissioni incluse): il capitale non è ancora rientrato.`}
-              {" "}Le startup attive ({fmt(startupStats.activeVal)}) sono valorizzate al costo nel patrimonio; le concluse ne escono.
+              {startupStats.allClosed
+                ? `🏁 Bilancio finale: a fronte di ${fmt(startupStats.totalOutlay)} di esborso complessivo (capitale + commissioni + abbonamento) hai recuperato ${fmt(startupStats.totalValue)}, con un risultato di ${fmt(startupStats.pnlOverall)}.`
+                : <>
+                    {startupStats.closed.length === 0
+                      ? "Nessuna startup conclusa: P&L realizzato e ROI su concluse si calcolano su Exit e Fallimenti."
+                      : startupStats.pnlTot >= 0
+                        ? `✅ Sulle ${startupStats.closed.length} startup concluse hai recuperato ${fmt(startupStats.recoveredTot)} a fronte di ${fmt(startupStats.closedCost)} di costo totale (commissioni incluse).`
+                        : `⚠ Sulle ${startupStats.closed.length} startup concluse hai recuperato ${fmt(startupStats.recoveredTot)} a fronte di ${fmt(startupStats.closedCost)} di costo totale (commissioni incluse): il capitale non è ancora rientrato.`}
+                    {" "}Il ROI complessivo include l'abbonamento ({fmt(startupStats.subscription)}) e valorizza le {startupStats.active.length} attive a {fmt(startupStats.activeValue)}: diventerà il risultato definitivo quando tutte saranno chiuse.
+                  </>}
+              {" "}Le startup attive ({fmt(startupStats.activeVal)}) sono valorizzate al costo nel patrimonio; le concluse ne escono — l'incasso di un'exit va inserito a mano in liquidità.
             </p>
           </>
         )}
 
         {startups.length === 0 ? (
           <EmptyState icon={Activity} title="Nessuna startup"
-            description="Traccia gli investimenti in startup e fondi di venture capital. Inserisci l'importo investito e le eventuali commissioni."
-            action={<button className="btn btn-primary" onClick={() => setStartupModal({})}><Plus size={15}/> Aggiungi startup</button>}/>
+            description={readOnly
+              ? "Questo portafoglio non contiene investimenti in startup."
+              : "Traccia gli investimenti in startup e fondi di venture capital. Inserisci l'importo investito e le eventuali commissioni."}
+            action={readOnly ? null : <button className="btn btn-primary" onClick={() => setStartupModal({})}><Plus size={15}/> Aggiungi startup</button>}/>
         ) : (
           <div className="table-wrap">
             <table className="data-table">
@@ -2032,7 +2238,7 @@ const refreshGoldPrices = useCallback(async () => {
                 <tr>
                   <th>Nome</th><th>Stato</th>
                   <th className="num">Investito</th><th className="num">Commissioni</th><th className="num">Costo totale</th>
-                  <th className="num">Recuperato</th><th className="num">P&amp;L</th><th className="num">ROI</th><th></th>
+                  <th className="num">Recuperato / Valore</th><th className="num">P&amp;L</th><th className="num">ROI</th><th></th>
                 </tr>
               </thead>
               <tbody>
@@ -2046,18 +2252,31 @@ const refreshGoldPrices = useCallback(async () => {
                     <td className="num mono"><strong>{fmt(s.invested)}</strong></td>
                     <td className="num mono">{fmt(s.fee)}</td>
                     <td className="num mono">{fmt(s.totalCost)}</td>
-                    <td className="num mono">{s.recovered == null ? <span className="muted">—</span> : fmt(s.recovered)}</td>
-                    <td className={`num mono ${s.pnl == null ? "" : s.pnl >= 0 ? "pos-text" : "neg-text"}`}>
-                      {s.pnl == null ? <span className="muted">—</span> : <strong>{fmt(s.pnl)}</strong>}
+                    {/* Sulle attive con valutazione: valore stimato e P&L non realizzato, in muted. */}
+                    <td className="num mono">
+                      {s.closed ? fmt(s.recovered)
+                        : s.currentValue != null ? <span className="muted" title="Valutazione attuale stimata">{fmt(s.value)}</span>
+                        : <span className="muted">—</span>}
                     </td>
-                    <td className="num">{s.roiPct == null ? <span className="muted mono">—</span> : <Badge value={s.roiPct}/>}</td>
+                    <td className={`num mono ${s.pnl == null ? "" : s.pnl >= 0 ? "pos-text" : "neg-text"}`}>
+                      {s.closed ? <strong>{fmt(s.pnl)}</strong>
+                        : s.currentValue != null ? <span className="muted" title="Non realizzato">{fmt(s.unrealPnl)}</span>
+                        : <span className="muted">—</span>}
+                    </td>
+                    <td className="num">
+                      {s.closed && s.roiPct != null ? <Badge value={s.roiPct}/>
+                        : !s.closed && s.currentValue != null && s.unrealRoiPct != null ? <Badge value={s.unrealRoiPct}/>
+                        : <span className="muted mono">—</span>}
+                    </td>
                     <td>
-                      <div className="row-actions">
-                        <button className="icon-btn" onClick={() => setStartupModal(s)}><Edit2 size={14}/></button>
-                        <button className="icon-btn danger" onClick={() => { if (window.confirm(`Rimuovere ${s.name}?`)) deleteSU(s.id); }}>
-                          <Trash2 size={14}/>
-                        </button>
-                      </div>
+                      {!readOnly && (
+                        <div className="row-actions">
+                          <button className="icon-btn" onClick={() => setStartupModal(s)}><Edit2 size={14}/></button>
+                          <button className="icon-btn danger" onClick={() => { if (window.confirm(`Rimuovere ${s.name}?`)) deleteSU(s.id); }}>
+                            <Trash2 size={14}/>
+                          </button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -2075,13 +2294,25 @@ const refreshGoldPrices = useCallback(async () => {
                   <td className="num">{startupStats.roiPct != null ? <Badge value={startupStats.roiPct}/> : <span className="muted mono">—</span>}</td>
                   <td></td>
                 </tr>
+                {/* Bilancio complessivo: include l'abbonamento e le attive a valutazione. */}
+                <tr className="total-row">
+                  <td colSpan={4}><strong>{startupStats.allClosed ? "Bilancio finale" : "Complessivo"}</strong> <span className="muted">(incluso abbonamento)</span></td>
+                  <td className="num mono"><strong>{fmt(startupStats.totalOutlay)}</strong></td>
+                  <td className="num mono"><strong>{fmt(startupStats.totalValue)}</strong></td>
+                  <td className="num mono" style={{ color: startupStats.pnlOverall >= 0 ? "var(--green)" : "var(--red)" }}>
+                    <strong>{fmt(startupStats.pnlOverall)}</strong>
+                  </td>
+                  <td className="num">{startupStats.roiOverallPct != null ? <Badge value={startupStats.roiOverallPct}/> : <span className="muted mono">—</span>}</td>
+                  <td></td>
+                </tr>
               </tfoot>
             </table>
           </div>
         )}
       </div>
 
-      {/* Config export/import */}
+      {/* Config export/import — riservato al proprietario */}
+      {!readOnly && (
       <div className="section-card">
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
           <div>
@@ -2108,6 +2339,7 @@ const refreshGoldPrices = useCallback(async () => {
           </div>
         </div>
       </div>
+      )}
     </div>
   );
 
@@ -2365,6 +2597,28 @@ const refreshGoldPrices = useCallback(async () => {
   };
 
   // ====================== RENDER ======================
+  // Link condiviso non valido / revocato: pagina d'errore, nessun dato.
+  if (shareErr) {
+    return (
+      <div className={`app ${dark ? "dark" : "light"}`}>
+        <header className="app-header">
+          <div className="header-left">
+            <div className="logo-mark">PF</div>
+            <h1 className="app-title">Portfolio Tracker</h1>
+          </div>
+        </header>
+        <main className="app-main">
+          <div className="welcome-card">
+            <div className="welcome-icon">🔒</div>
+            <h2 className="welcome-title">Portafoglio non disponibile</h2>
+            <p className="welcome-desc">{shareErr}</p>
+            <a className="btn btn-primary" href="/">Vai al Portfolio Tracker</a>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className={`app ${dark ? "dark" : "light"}`}>
       <header className="app-header">
@@ -2373,13 +2627,15 @@ const refreshGoldPrices = useCallback(async () => {
           <div>
             <h1 className="app-title">Portfolio Tracker</h1>
             <p className="app-subtitle">
-              <Info size={12}/> Aggiornamento automatico ogni 15 min
-              {lastSaved && !saveErr && (
+              {readOnly
+                ? <><Eye size={12}/> Vista condivisa · sola lettura</>
+                : <><Info size={12}/> Aggiornamento automatico ogni 15 min</>}
+              {!readOnly && lastSaved && !saveErr && (
                 <span style={{ color: "var(--green)" }}>
                   · Salvato {lastSaved.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })}
                 </span>
               )}
-              {saveErr && (
+              {!readOnly && saveErr && (
                 <span style={{ color: "var(--red)" }}>· ⚠ Non salvato: {saveErr}</span>
               )}
               {isLoading && (
@@ -2398,16 +2654,21 @@ const refreshGoldPrices = useCallback(async () => {
               {totals.ret !== 0 && <Badge value={totals.ret * 100}/>}
             </div>
           )}
-          {assets.length > 0 && (
+          {!readOnly && assets.length > 0 && (
             <button className="btn btn-primary" onClick={fetchAllPrices} disabled={isLoading}>
               <RefreshCw size={14} className={isLoading ? "spin" : ""}/>
               {isLoading ? "Aggiornamento…" : "Aggiorna prezzi"}
             </button>
           )}
+          {!readOnly && (
+            <button className="btn btn-ghost" onClick={() => setShareModal(true)} title="Condividi in sola lettura">
+              <Share2 size={15}/> Condividi
+            </button>
+          )}
           <button className="icon-btn theme-toggle" onClick={() => setDark((d) => !d)} title="Cambia tema">
             {dark ? <Sun size={17}/> : <Moon size={17}/>}
           </button>
-          {session && supabase && (
+          {!readOnly && session && supabase && (
             <button className="icon-btn theme-toggle" title={`Esci (${session.user?.email || ""})`}
               onClick={() => supabase.auth.signOut()}>
               <LogOut size={17}/>
@@ -2416,6 +2677,16 @@ const refreshGoldPrices = useCallback(async () => {
         </div>
       </header>
 
+      {readOnly && (
+        <div className="alert alert-amber mx-4">
+          <Eye size={14}/>
+          <span>
+            Stai visualizzando un portafoglio <strong>condiviso in sola lettura</strong>.
+            Non è possibile aggiungere, modificare o eliminare dati.
+          </span>
+        </div>
+      )}
+
       {error && (
         <div className="alert alert-red mx-4">
           <AlertTriangle size={14}/> {error}
@@ -2423,7 +2694,7 @@ const refreshGoldPrices = useCallback(async () => {
       )}
 
       <nav className="tab-bar">
-        {TABS.map((t) => {
+        {visibleTabs.map((t) => {
           const Icon = t.icon;
           return (
             <button key={t.id} className={`tab-btn ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>
@@ -2476,6 +2747,7 @@ const refreshGoldPrices = useCallback(async () => {
       {acModal && (
         <AssetClassModal classes={assetClasses} onSave={setAC} onClose={() => setACModal(false)}/>
       )}
+      {shareModal && <ShareModal onClose={() => setShareModal(false)}/>}
     </div>
   );
 }

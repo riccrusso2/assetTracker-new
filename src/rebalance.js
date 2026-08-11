@@ -129,6 +129,8 @@ const SU_STATUSES = ["active", "exit", "failed"];
 export const suStatus = (s) => (SU_STATUSES.includes(s?.status) ? s.status : "active");
 
 // Metriche del singolo investimento. recovered/pnl/roiPct sono null finché è attivo.
+// `currentValue` è la valutazione odierna di un'attiva (round successivi): opzionale,
+// se manca l'attiva vale il capitale investito.
 export const calcStartupMetrics = (s) => {
   const status    = suStatus(s);
   const invested  = s.invested || 0;
@@ -138,32 +140,58 @@ export const calcStartupMetrics = (s) => {
   const recovered = status === "exit" ? (s.exitAmount || 0) : status === "failed" ? 0 : null;
   const pnl       = closed ? r2(recovered - totalCost) : null;
   const roiPct    = closed && totalCost > 0 ? r2((pnl / totalCost) * 100) : null;
-  return { ...s, status, invested, fee, totalCost, closed, recovered, pnl, roiPct };
+
+  const currentValue = !closed && s.currentValue != null && s.currentValue !== "" ? r2(s.currentValue) : null;
+  // Valore odierno: incasso reale sulle concluse, valutazione (o costo) sulle attive.
+  const value        = closed ? (recovered || 0) : r2(currentValue ?? invested);
+  const unrealPnl    = closed ? null : r2(value - totalCost);
+  const unrealRoiPct = !closed && totalCost > 0 ? r2((unrealPnl / totalCost) * 100) : null;
+
+  return { ...s, status, invested, fee, totalCost, closed, recovered, pnl, roiPct,
+           currentValue, value, unrealPnl, unrealRoiPct };
 };
 
-// Riepilogo aggregato del portafoglio startup. P&L e ROI si misurano solo sulle
-// concluse: dicono se il recuperato copre il costo sostenuto, commissioni incluse.
-export const calcStartupPortfolio = (startups) => {
+// Riepilogo aggregato del portafoglio startup. Due letture affiancate:
+//  - realizzato: solo le concluse, dice se il recuperato copre il costo sostenuto;
+//  - complessivo: tutte le posizioni + l'abbonamento alla piattaforma, cioè se
+//    l'operazione startup nel suo insieme è in guadagno o in perdita.
+// L'abbonamento è un costo comune: non viene ripartito sulle singole startup.
+export const calcStartupPortfolio = (startups, subscription = 0) => {
   const rows   = (startups || []).map(calcStartupMetrics);
   const active = rows.filter((s) => !s.closed);
   const closed = rows.filter((s) => s.closed);
   const failed = rows.filter((s) => s.status === "failed");
   const sum = (list, f) => r2(list.reduce((a, s) => a + f(s), 0));
 
+  const sub          = subscription || 0;
   const investedTot  = sum(rows, (s) => s.invested);
   const feesTot      = sum(rows, (s) => s.fee);
-  const activeVal    = sum(active, (s) => s.invested);
+  const activeVal    = sum(active, (s) => s.invested);   // a costo → patrimonio
+  const activeValue  = sum(active, (s) => s.value);      // a valutazione corrente
   const closedCost   = sum(closed, (s) => s.totalCost);
   const recoveredTot = sum(closed, (s) => s.recovered || 0);
   const pnlTot       = r2(recoveredTot - closedCost);
+
+  const totalOutlay  = r2(investedTot + feesTot + sub);  // tutto ciò che è uscito di tasca
+  const totalValue   = r2(recoveredTot + activeValue);   // tutto ciò che è rientrato o vale ancora
+  const pnlOverall   = r2(totalValue - totalOutlay);
+  // Quando tutte sono chiuse activeValue è 0: complessivo e realizzato-netto convergono.
+  const pnlRealizedNet = r2(pnlTot - sub);
+  const realizedBase   = r2(closedCost + sub);
 
   return {
     rows, active, closed,
     investedTot, feesTot,
     costTot:    r2(investedTot + feesTot),
-    activeVal, closedCost, recoveredTot,
+    activeVal, activeValue, closedCost, recoveredTot,
     failedLoss: sum(failed, (s) => s.totalCost),
     pnlTot,
     roiPct: closedCost > 0 ? r2((pnlTot / closedCost) * 100) : null,
+    subscription: sub,
+    totalOutlay, totalValue, pnlOverall,
+    roiOverallPct: totalOutlay > 0 ? r2((pnlOverall / totalOutlay) * 100) : null,
+    pnlRealizedNet,
+    roiRealizedNetPct: realizedBase > 0 ? r2((pnlRealizedNet / realizedBase) * 100) : null,
+    allClosed: rows.length > 0 && active.length === 0,
   };
 };

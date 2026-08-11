@@ -126,3 +126,59 @@ test("riepilogo senza startup concluse: ROI non calcolabile", () => {
   expect(p.roiPct).toBeNull();
   expect(p.pnlTot).toBe(0);
 });
+
+// ------ Bilancio complessivo: capitale + commissioni + abbonamento ------
+
+test("attiva con valutazione attuale: P&L non realizzato sul costo totale", () => {
+  const s = calcStartupMetrics({ name: "Up", invested: 5000, fee: 500, currentValue: 7700 });
+  expect(s.value).toBe(7700);
+  expect(s.unrealPnl).toBe(2200);
+  expect(s.unrealRoiPct).toBeCloseTo(40, 2);
+  expect(s.pnl).toBeNull();        // non è realizzato
+});
+
+test("attiva senza valutazione: vale il capitale investito, sotto di una commissione", () => {
+  const s = calcStartupMetrics({ name: "Flat", invested: 5000, fee: 500 });
+  expect(s.currentValue).toBeNull();
+  expect(s.value).toBe(5000);
+  expect(s.unrealPnl).toBe(-500);
+});
+
+test("complessivo: abbonamento e commissioni pesano sul ROI totale", () => {
+  const p = calcStartupPortfolio([
+    { id: "a", invested: 10_000, fee: 500, currentValue: 12_000 },                // attiva rivalutata
+    { id: "b", invested: 5_000,  fee: 250, status: "exit", exitAmount: 9_000 },   // exit
+    { id: "c", invested: 3_000,  fee: 150, status: "failed" },                    // fallita
+  ], 468);
+  expect(p.subscription).toBe(468);
+  expect(p.activeVal).toBe(10_000);      // patrimonio: sempre a costo
+  expect(p.activeValue).toBe(12_000);    // statistiche: a valutazione
+  expect(p.totalOutlay).toBe(19_368);    // 18.000 + 900 + 468
+  expect(p.totalValue).toBe(21_000);     // 9.000 recuperati + 12.000 attivi
+  expect(p.pnlOverall).toBe(1_632);
+  expect(p.roiOverallPct).toBeCloseTo(8.43, 2);
+  expect(p.pnlTot).toBe(600);            // il realizzato non cambia
+  expect(p.allClosed).toBe(false);
+});
+
+test("tutte concluse: complessivo e realizzato-netto danno lo stesso verdetto finale", () => {
+  const p = calcStartupPortfolio([
+    { id: "b", invested: 5_000, fee: 250, status: "exit", exitAmount: 9_000 },
+    { id: "c", invested: 3_000, fee: 150, status: "failed" },
+  ], 468);
+  expect(p.allClosed).toBe(true);
+  expect(p.activeValue).toBe(0);
+  expect(p.pnlOverall).toBe(132);                 // 600 realizzati − 468 di abbonamento
+  expect(p.pnlRealizedNet).toBe(p.pnlOverall);
+  expect(p.roiOverallPct).toBeCloseTo(p.roiRealizedNetPct, 6);
+  expect(p.roiOverallPct).toBeCloseTo(1.49, 2);
+});
+
+test("abbonamento omesso: retrocompatibile col calcolo precedente", () => {
+  const rows = [{ id: "b", invested: 5_000, fee: 250, status: "exit", exitAmount: 9_000 }];
+  const p = calcStartupPortfolio(rows);
+  expect(p.subscription).toBe(0);
+  expect(p.allClosed).toBe(true);
+  expect(p.pnlOverall).toBe(p.pnlTot);
+  expect(p.roiOverallPct).toBeCloseTo(p.roiPct, 6);
+});

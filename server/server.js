@@ -6,6 +6,7 @@ const cors    = require("cors");
 const fetch   = require("node-fetch");
 const dns     = require("dns");
 const https   = require("https");
+const crypto  = require("crypto");
 
 // Railway/Alpine musl resolver intermittently returns ENOTFOUND for
 // api.gold-api.com (no retry on flaky authoritative NS). Resolve that
@@ -47,6 +48,7 @@ if (useSupabase) {
 const DATA_DIR       = path.join(__dirname, "../data");
 const SNAPSHOTS_FILE = path.join(DATA_DIR, "snapshots.json");
 const CONFIG_FILE    = path.join(DATA_DIR, "config.json");
+const SHARE_FILE     = path.join(DATA_DIR, "share.json");
 
 if (!useSupabase) {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -100,6 +102,115 @@ app.post("/api/config", requireAuth, async (req, res) => {
     }
     writeJsonAtomic(CONFIG_FILE, { ...cfg, savedAt: new Date().toISOString() });
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Condivisione read-only ────────────────────────────────────
+// Il link pubblico usa un token opaco (192 bit, base64url) e mai lo user_id.
+// `enabled` separa "token esistente" da "condivisione attiva": revocare e
+// riattivare non cambia lo schema né invalida la logica del client.
+const TOKEN_RE = /^[A-Za-z0-9_-]{22,64}$/;
+const newToken = () => crypto.randomBytes(24).toString("base64url"); // 32 char
+
+function readShareFile() {
+  try { return JSON.parse(fs.readFileSync(SHARE_FILE, "utf8")); }
+  catch { return { token: null, enabled: false }; }
+}
+
+// Stato corrente della condivisione (solo proprietario).
+app.get("/api/share", requireAuth, async (req, res) => {
+  try {
+    if (useSupabase) {
+      const { data, error } = await supabase
+        .from("portfolios").select("share_token, share_enabled")
+        .eq("user_id", req.userId).maybeSingle();
+      if (error) throw error;
+      const enabled = !!(data?.share_enabled && data?.share_token);
+      return res.json({ enabled, token: enabled ? data.share_token : null });
+    }
+    const s = readShareFile();
+    res.json({ enabled: !!(s.enabled && s.token), token: s.enabled ? s.token : null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Attiva la condivisione: riusa il token esistente, altrimenti ne genera uno.
+app.post("/api/share", requireAuth, async (req, res) => {
+  try {
+    if (useSupabase) {
+      const { data: row, error } = await supabase
+        .from("portfolios").select("share_token").eq("user_id", req.userId).maybeSingle();
+      if (error) throw error;
+      const token = row?.share_token || newToken();
+      // Payload senza `data`: l'upsert aggiorna solo le colonne passate,
+      // quindi il blob del portafoglio resta intatto.
+      const { error: upErr } = await supabase.from("portfolios").upsert(
+        { user_id: req.userId, share_token: token, share_enabled: true },
+        { onConflict: "user_id" },
+      );
+      if (upErr) throw upErr;
+      return res.json({ enabled: true, token });
+    }
+    const s = readShareFile();
+    const token = s.token || newToken();
+    writeJsonAtomic(SHARE_FILE, { token, enabled: true });
+    res.json({ enabled: true, token });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Revoca: il link smette di funzionare, il token resta per riattivarlo.
+app.delete("/api/share", requireAuth, async (req, res) => {
+  try {
+    if (useSupabase) {
+      const { error } = await supabase
+        .from("portfolios").update({ share_enabled: false }).eq("user_id", req.userId);
+      if (error) throw error;
+      return res.json({ enabled: false, token: null });
+    }
+    const s = readShareFile();
+    writeJsonAtomic(SHARE_FILE, { token: s.token, enabled: false });
+    res.json({ enabled: false, token: null });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Vista pubblica: nessuna auth, sola lettura, nessun dato oltre al portafoglio.
+// Il formato del token è validato prima della query, così un token vuoto o
+// malformato non può mai matchare righe con share_token null.
+app.get("/api/public/:token", async (req, res) => {
+  const token = req.params.token;
+  const notFound = () => res.status(404).json({ error: "Link non valido o non più attivo" });
+  if (!TOKEN_RE.test(token)) return notFound();
+
+  try {
+    if (useSupabase) {
+      const { data: row, error } = await supabase
+        .from("portfolios").select("user_id, data, share_enabled")
+        .eq("share_token", token).maybeSingle();
+      if (error) throw error;
+      if (!row || !row.share_enabled) return notFound();
+
+      const { data: snaps, error: snapErr } = await supabase
+        .from("snapshots").select("*").eq("user_id", row.user_id)
+        .order("year", { ascending: true }).order("month", { ascending: true });
+      if (snapErr) throw snapErr;
+
+      // user_id resta lato server: la risposta contiene solo i dati del portafoglio.
+      return res.json({ config: row.data ?? null, snapshots: (snaps || []).map(toClientSnap) });
+    }
+
+    const share = readShareFile();
+    if (!share.enabled || !share.token || share.token !== token) return notFound();
+    const config = fs.existsSync(CONFIG_FILE)
+      ? JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"))
+      : null;
+    res.json({ config, snapshots: readSnapshotsFile() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

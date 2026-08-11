@@ -18,6 +18,7 @@
     "start": "node server/server.js",
     "build": "react-scripts build",
     "test": "react-scripts test",
+    "test:share": "node scripts/test-share.js",
     "eject": "react-scripts eject"
   },
   "eslintConfig": {

@@ -35,6 +35,19 @@ create table if not exists public.snapshots (
 create index if not exists snapshots_user_idx on public.snapshots (user_id);
 
 -- ─────────────────────────────────────────────────────────────
+-- Condivisione read-only
+-- Token opaco (base64url, 32 char) al posto dello user_id: il link
+-- pubblico non espone l'identificativo interno dell'utente.
+-- share_enabled permette di revocare la condivisione mantenendo il
+-- token (riattivabile), senza toccare lo schema in futuro.
+-- ─────────────────────────────────────────────────────────────
+alter table public.portfolios add column if not exists share_token   text;
+alter table public.portfolios add column if not exists share_enabled boolean not null default false;
+
+create unique index if not exists portfolios_share_token_idx
+  on public.portfolios (share_token) where share_token is not null;
+
+-- ─────────────────────────────────────────────────────────────
 -- Trigger: updated_at automatico su portfolios
 -- ─────────────────────────────────────────────────────────────
 create or replace function public.set_updated_at()

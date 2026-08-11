@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { supabase } from "./supabaseClient";
-import { LogIn, UserPlus, CheckCircle } from "lucide-react";
+import { LogIn, UserPlus } from "lucide-react";
 
 // Schermata login / registrazione. Usata solo quando Supabase è configurato
 // e non c'è sessione attiva (vedi AuthGate).
