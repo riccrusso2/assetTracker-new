@@ -120,6 +120,67 @@ test("Analisi calcola il fisco e mostra la regola degli ETF", async () => {
   expect(screen.getByText(/usabile fino al/i)).toBeInTheDocument();
 });
 
+// Il registro parte vuoto: è lo stato in cui si trova chi apre la tab per la
+// prima volta, ed è quello in cui i due bug sotto erano invisibili.
+describe("adozione del registro su un portafoglio senza movimenti", () => {
+  const VIRGIN = {
+    ...CONFIG,
+    transactions: [],
+    // Posizione inserita a mano, come nelle config pre-v4.
+    assets: [{ id: "a1", name: "Globale", identifier: "IE00B4L5Y983", quantity: 94.164474,
+               costBasis: 135.54, lastPrice: 150, targetWeight: 100, assetClass: "ETF" }],
+    goldEtf: { ...CONFIG.goldEtf, identifier: "", quantity: 0 },
+    settings: {},
+  };
+
+  beforeEach(() => {
+    apiFetch.mockImplementation((path) => {
+      if (path === "/api/config")    return ok(VIRGIN);
+      if (path === "/api/snapshots") return ok(SNAPSHOTS);
+      return ok({});
+    });
+  });
+
+  // Regressione: `uid()` (generatore di id) era ombreggiato dentro App dalla
+  // const `uid` con l'id utente. Il click lanciava "uid is not a function" e
+  // non succedeva niente — nessun errore a schermo.
+  test("«Genera dalle posizioni attuali» crea i movimenti", async () => {
+    render(<App session={{ user: { id: "u1", email: "a@b.c" } }} />);
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith("/api/config"));
+    await openTab("Movimenti");
+
+    await userEvent.click(await screen.findByRole("button", { name: /Genera dalle posizioni/i }));
+
+    expect(await screen.findByText(/1 registrati/i)).toBeInTheDocument();
+    expect(screen.getByText("Posizione iniziale")).toBeInTheDocument();
+    // La posizione non cambia: il seed riproduce quantità e PMC inseriti a mano.
+    await openTab("Portafoglio");
+    expect((await screen.findAllByText("Globale"))[0].closest("tr")).toHaveTextContent("94.164474");
+  }, 20000);
+
+  // Regressione: il primo movimento su un asset lo faceva passare al registro,
+  // e senza la riga di partenza la posizione diventava quella del solo
+  // movimento — 94 quote sostituite dalle 3 appena comprate.
+  test("«Segna come eseguito» aggiunge l'acquisto, non sostituisce la posizione", async () => {
+    jest.spyOn(window, "confirm").mockReturnValue(true);
+    render(<App session={{ user: { id: "u1", email: "a@b.c" } }} />);
+    await waitFor(() => expect(apiFetch).toHaveBeenCalledWith("/api/config"));
+    await openTab("Ribilanciamento");
+
+    await userEvent.click(await screen.findByRole("button", { name: /Segna come eseguito/i }));
+
+    expect(await screen.findByText("Posizione iniziale")).toBeInTheDocument();
+    // "Ribilanciamento" è anche il nome della tab: qui conta la nota del movimento.
+    expect(screen.getAllByText("Ribilanciamento").length).toBeGreaterThan(1);
+
+    await openTab("Portafoglio");
+    const row = (await screen.findAllByText("Globale"))[0].closest("tr");
+    const qty = parseFloat(row.querySelectorAll("td")[2].textContent);
+    expect(qty).toBeGreaterThan(94.164474);
+    window.confirm.mockRestore();
+  }, 20000);
+});
+
 test("la vista condivisa non mostra la tab Movimenti", async () => {
   apiFetch.mockImplementation((path) => {
     if (path.startsWith("/api/public/")) {

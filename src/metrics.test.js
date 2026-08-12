@@ -141,6 +141,22 @@ test("la griglia dei rendimenti raggruppa per anno e mese", () => {
   expect(grid[0].months[2]).toBeCloseTo(10, 1);
 });
 
+// Regressione: un mese a zero non produce rendimento (si dividerebbe per zero),
+// quindi la serie dei rendimenti è più corta di quella degli snapshot. Chi
+// indicizzava `snapshots[i + 1]` attribuiva ogni rendimento al mese sbagliato.
+test("uno snapshot a zero non sposta le etichette dei mesi successivi", () => {
+  const snaps = [
+    snap("Gen", 2026, 1, 0,    []),
+    snap("Feb", 2026, 2, 1000, [pos("etf", 100, 10)]),
+    snap("Mar", 2026, 3, 1100, [pos("etf", 110, 10)]),
+  ];
+  const grid = monthlyReturnsGrid(snaps);
+  expect(grid[0].months[3]).toBeCloseTo(10, 1);   // il +10% è di marzo
+  expect(grid[0].months[2]).toBeUndefined();      // febbraio non ha un mese prima
+  expect(drawdownSeries(snaps).map((d) => d.label)).toEqual(["Mar"]);
+  expect(benchmarkSeries(snaps, "etf")).toEqual([]);  // niente prezzo base a gennaio
+});
+
 // ====================== benchmark ======================
 
 test("benchmark: patrimonio e riferimento partono entrambi da 100", () => {

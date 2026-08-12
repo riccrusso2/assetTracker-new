@@ -15,14 +15,19 @@ export const OBS_RELIABLE  = 24;   // sotto: da leggere come indicazione
 
 // Rendimenti time-weighted: sottrae i flussi esterni (versamenti/prelievi) così
 // mettere soldi non si confonde con guadagnare.
-export const calcReturns = (history) => {
+// Ogni rendimento porta con sé l'indice dello snapshot di arrivo: i mesi con
+// valore precedente a zero vengono saltati, e senza l'indice le serie per i
+// grafici si disallineerebbero dalle etichette di un mese, in silenzio.
+export const returnsIndexed = (history) => {
   const r = [];
   for (let i = 1; i < history.length; i++) {
     if (history[i - 1].v <= 0) continue;
-    r.push((history[i].v - (history[i].cf || 0) - history[i - 1].v) / history[i - 1].v);
+    r.push({ i, r: (history[i].v - (history[i].cf || 0) - history[i - 1].v) / history[i - 1].v });
   }
   return r;
 };
+
+export const calcReturns = (history) => returnsIndexed(history).map((x) => x.r);
 
 export const calcCAGR = (history) => {
   if (history.length < 2) return null;
@@ -103,15 +108,14 @@ export const buildHistory = (snapshots) => {
 // Il numero singolo dice quanto è stata profonda la buca; la curva dice anche
 // quanto è durata, che è ciò che si sopporta davvero.
 export const drawdownSeries = (snapshots) => {
-  const hist = buildHistory(snapshots);
-  const r = calcReturns(hist);
+  const r = returnsIndexed(buildHistory(snapshots));
   if (!r.length) return [];
   const out = [];
   let idx = 1, peak = 1;
-  for (let i = 0; i < r.length; i++) {
-    idx *= 1 + r[i];
+  for (const x of r) {
+    idx *= 1 + x.r;
     if (idx > peak) peak = idx;
-    out.push({ label: snapshots[i + 1].label, dd: r2(((idx - peak) / peak) * 100) });
+    out.push({ label: snapshots[x.i].label, dd: r2(((idx - peak) / peak) * 100) });
   }
   return out;
 };
@@ -153,11 +157,10 @@ export const contributionByAsset = (snapshots) => {
 
 // Griglia anno × mese dei rendimenti netti dai versamenti.
 export const monthlyReturnsGrid = (snapshots) => {
-  const hist = calcReturns(buildHistory(snapshots));
   const rows = {};
-  hist.forEach((r, i) => {
-    const s = snapshots[i + 1];
-    (rows[s.year] ??= { year: s.year, months: {} }).months[s.month] = r2(r * 100);
+  returnsIndexed(buildHistory(snapshots)).forEach((x) => {
+    const s = snapshots[x.i];
+    (rows[s.year] ??= { year: s.year, months: {} }).months[s.month] = r2(x.r * 100);
   });
   return Object.values(rows).sort((a, b) => a.year - b.year);
 };
@@ -217,18 +220,18 @@ export const depletionYear = (data) => {
 // l'andamento di un mercato.
 export const benchmarkSeries = (snapshots, benchmarkKey) => {
   if (snapshots.length < 2 || !benchmarkKey) return [];
-  const r = calcReturns(buildHistory(snapshots));
+  const r = returnsIndexed(buildHistory(snapshots));
   const priceAt = (s) => (s.assets || []).find((a) => snapKey(a) === benchmarkKey)?.price ?? null;
   const base = priceAt(snapshots[0]);
   if (!base) return [];
 
   const out = [{ label: snapshots[0].label, portfolio: 100, benchmark: 100 }];
   let idx = 1;
-  for (let i = 0; i < r.length; i++) {
-    idx *= 1 + r[i];
-    const p = priceAt(snapshots[i + 1]);
+  for (const x of r) {
+    idx *= 1 + x.r;
+    const p = priceAt(snapshots[x.i]);
     out.push({
-      label: snapshots[i + 1].label,
+      label: snapshots[x.i].label,
       portfolio: r2(idx * 100),
       benchmark: p ? r2((p / base) * 100) : null,
     });

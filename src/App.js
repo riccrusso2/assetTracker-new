@@ -115,7 +115,7 @@ const fmt = (n, compact = false) => {
 
 const fmtPct = (n) => (n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(2) + "%");
 const isISIN  = (v) => /^[A-Z0-9]{12}$/i.test((v || "").trim());
-const uid     = ()  => Math.random().toString(36).slice(2, 10);
+const newId   = ()  => Math.random().toString(36).slice(2, 10);
 
 // Etichette UI degli stati startup (logica in rebalance.js).
 const STARTUP_STATUS = {
@@ -398,7 +398,7 @@ const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, fromTx = false, 
     if (!form.name || !form.quantity || !form.costBasis || targetOver) return;
     onSave({
       ...form,
-      id:           form.id || uid(),
+      id:           form.id || newId(),
       quantity:     parseFloat(form.quantity)     || 0,
       costBasis:    parseFloat(form.costBasis)    || 0,
       targetWeight: target,
@@ -487,7 +487,7 @@ const StartupModal = ({ startup, onSave, onClose }) => {
     if (!form.name || !form.invested) return;
     const status = form.status || "active";
     onSave({
-      id: form.id || uid(), name: form.name,
+      id: form.id || newId(), name: form.name,
       invested: parseFloat(form.invested) || 0,
       fee: parseFloat(form.fee) || 0,
       status,
@@ -663,7 +663,7 @@ const TxModal = ({ tx, options, onSave, onClose }) => {
   const handleSave = () => {
     if (!valid) return;
     onSave({
-      id: form.id || uid(),
+      id: form.id || newId(),
       date: form.date,
       assetKey: form.assetKey,
       type: form.type,
@@ -740,7 +740,7 @@ const TxModal = ({ tx, options, onSave, onClose }) => {
 
 // ---- Modal Gold ETF ----
 // etfTargetOthers: somma dei target degli altri asset del sotto-portafoglio ETF.
-const GoldEtfModal = ({ goldEtf, etfTargetOthers = 0, onSave, onClose }) => {
+const GoldEtfModal = ({ goldEtf, etfTargetOthers = 0, fromTx = false, onSave, onClose }) => {
   const [form, setForm] = useState({ ...goldEtf });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -777,11 +777,23 @@ const GoldEtfModal = ({ goldEtf, etfTargetOthers = 0, onSave, onClose }) => {
               className="field-input" placeholder="es. IE00B4ND3602"/>
           </label>
           <label className="field-label">Quantità (quote)
-            <input type="number" step="any" value={form.quantity} onChange={(e) => set("quantity", e.target.value)} className="field-input"/>
+            <input type="number" step="any" value={form.quantity} onChange={(e) => set("quantity", e.target.value)}
+              className="field-input" readOnly={fromTx}
+              title={fromTx ? "Calcolato dai movimenti registrati" : undefined}
+              style={fromTx ? { opacity: 0.6, cursor: "not-allowed" } : undefined}/>
           </label>
           <label className="field-label">Prezzo medio carico (€/quota)
-            <input type="number" step="any" value={form.costBasis} onChange={(e) => set("costBasis", e.target.value)} className="field-input"/>
+            <input type="number" step="any" value={form.costBasis} onChange={(e) => set("costBasis", e.target.value)}
+              className="field-input" readOnly={fromTx}
+              title={fromTx ? "Calcolato dai movimenti registrati" : undefined}
+              style={fromTx ? { opacity: 0.6, cursor: "not-allowed" } : undefined}/>
           </label>
+          {fromTx && (
+            <p className="hint-text" style={{ marginTop: 0 }}>
+              Quantità e prezzo medio di carico arrivano dai movimenti registrati:
+              per correggerli modifica il movimento nella tab <strong>Movimenti</strong>.
+            </p>
+          )}
           <label className="field-label">Peso target (%)
             <input type="number" step="any" value={form.targetWeight} onChange={(e) => set("targetWeight", e.target.value)} className="field-input"/>
           </label>
@@ -1692,8 +1704,11 @@ const refreshGoldPrices = useCallback(async () => {
   useEffect(() => {
     // Read-only: si mostrano i prezzi salvati dal proprietario, niente refresh
     // (aggiornerebbe lo stato locale mostrando dati che il proprietario non ha).
-    if (readOnly) return;
-    if (assets.length > 0 || goldEtf.identifier) fetchAllPrices();
+    // Si aspetta la config: a mount gli asset arrivano solo dalla cache
+    // localStorage, che su un browser nuovo è vuota — e il primo refresh
+    // sarebbe slittato di 15 minuti.
+    if (readOnly || !configLoaded) return;
+    if (assetsRef.current.length > 0 || goldEtfRef.current.identifier) fetchAllPrices();
     // Try to refresh physical gold spot on load too
     fetchGoldSpotPrice().catch(() => {});
     intervalRef.current = setInterval(() => {
@@ -1702,7 +1717,7 @@ const refreshGoldPrices = useCallback(async () => {
     }, AUTO_REFRESH_MS);
     return () => clearInterval(intervalRef.current);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [configLoaded]);
 
   // ---- Snapshot ----
   const buildSnapshot = useCallback(() => {
@@ -1919,10 +1934,17 @@ const refreshGoldPrices = useCallback(async () => {
     }
   }, [refreshSnapshots]);
 
-  const saveTx = (t) => setTx((prev) => {
-    const idx = prev.findIndex((x) => x.id === t.id);
-    return idx >= 0 ? prev.map((x) => x.id === t.id ? t : x) : [...prev, t];
-  });
+  // Il primo movimento di un asset che aveva la posizione inserita a mano deve
+  // aggiungersi a quella posizione, non sostituirla: si registra prima la riga
+  // di partenza (vedi seedRows).
+  const saveTx = (t) => {
+    const isNew = !transactions.some((x) => x.id === t.id);
+    const seeds = isNew ? seedRows(new Set([t.assetKey])) : [];
+    setTx((prev) => {
+      const idx = prev.findIndex((x) => x.id === t.id);
+      return idx >= 0 ? prev.map((x) => x.id === t.id ? t : x) : [...prev, ...seeds, t];
+    });
+  };
   const deleteTx = (id) => setTx((prev) => prev.filter((t) => t.id !== id));
 
   // Chiude il ciclo del ribilanciamento: gli acquisti proposti diventano
@@ -1948,11 +1970,16 @@ const refreshGoldPrices = useCallback(async () => {
       "\n\nLe quantità degli asset coinvolti passeranno a essere calcolate dai movimenti."
     )) return;
 
-    setTx((prev) => [...prev, ...rows.map((x) => ({
-      id: uid(), date, assetKey: txKey({ name: x.name }), type: "buy",
-      quantity: r2(x.amount / x.price), price: x.price, fee: 0,
-      notes: "Ribilanciamento",
-    }))]);
+    // Un asset senza movimenti prende la posizione dai suoi campi; appena ne ha
+    // uno la prende dal registro. Senza la riga di partenza, il primo acquisto
+    // registrato *sostituirebbe* la posizione invece di aggiungersi: 94 quote
+    // diventerebbero le 3 appena comprate.
+    setTx((prev) => [...prev, ...seedRows(new Set(rows.map((x) => txKey({ name: x.name })))),
+      ...rows.map((x) => ({
+        id: newId(), date, assetKey: txKey({ name: x.name }), type: "buy",
+        quantity: r2(x.amount / x.price), price: x.price, fee: 0,
+        notes: "Ribilanciamento",
+      }))]);
     setTab("transactions");
   };
 
@@ -1960,19 +1987,25 @@ const refreshGoldPrices = useCallback(async () => {
   // inserita a mano, così quantità e PMC restano identici e da lì in avanti si
   // registrano i movimenti veri. Datata al primo snapshot, che è il momento più
   // antico di cui la dashboard abbia memoria.
-  const seedTransactions = () => {
+  // `keys` limita il seed agli asset che stanno per ricevere un movimento.
+  const seedRows = (keys = null) => {
     const first = snapshots[0];
     const date = first
       ? `${first.year}-${String(first.month).padStart(2, "0")}-01`
       : new Date().toISOString().slice(0, 10);
     const already = new Set(transactions.map((t) => t.assetKey));
-    const seeds = [...storedAssets, ...(storedGoldEtf.identifier ? [storedGoldEtf] : [])]
-      .filter((a) => (a.quantity || 0) > 0 && !already.has(txKey(a)))
+    return [...storedAssets, ...(storedGoldEtf.identifier ? [storedGoldEtf] : [])]
+      .filter((a) => (a.quantity || 0) > 0 && !already.has(txKey(a))
+                  && (!keys || keys.has(txKey(a))))
       .map((a) => ({
-        id: uid(), date, assetKey: txKey(a), type: "buy",
+        id: newId(), date, assetKey: txKey(a), type: "buy",
         quantity: a.quantity, price: a.costBasis || 0, fee: 0,
         notes: "Posizione iniziale",
       }));
+  };
+
+  const seedTransactions = () => {
+    const seeds = seedRows();
     if (seeds.length) setTx((prev) => [...prev, ...seeds]);
   };
 
@@ -3912,7 +3945,10 @@ const refreshGoldPrices = useCallback(async () => {
       {/* Modali */}
       {assetModal !== null && (
         <AssetModal
-          asset={assetModal}
+          // La tabella passa l'asset derivato dai movimenti; il modale deve
+          // ricevere quello salvato, altrimenti salvando si riscrive la
+          // posizione calcolata dentro la config.
+          asset={(assetModal?.id && storedAssets.find((s) => s.id === assetModal.id)) || assetModal}
           assetClasses={assetClasses}
           etfTargetOthers={r2(etfTargetSum - (assetModal?.id && !isTotalTargetAsset(assetModal) ? (assetModal.targetWeight || 0) : 0))}
           fromTx={!!assetModal?.id && transactions.some((t) => t.assetKey === txKey(assetModal))}
@@ -3931,8 +3967,9 @@ const refreshGoldPrices = useCallback(async () => {
         <StartupModal startup={startupModal?.id ? startupModal : null} onSave={saveSU} onClose={() => setStartupModal(null)}/>
       )}
       {goldEtfModal && (
-        <GoldEtfModal goldEtf={goldEtf}
+        <GoldEtfModal goldEtf={storedGoldEtf}
           etfTargetOthers={r2(etfTargetSum - (goldOnTotal ? 0 : (goldEtf.targetWeight || 0)))}
+          fromTx={transactions.some((t) => t.assetKey === txKey(storedGoldEtf))}
           onSave={(updated) => {
           setGoldEtf(updated);
           if (updated.identifier && isISIN(updated.identifier)) setTimeout(refreshGoldPrices, 300);
