@@ -918,12 +918,13 @@ const usePriceFetcher = () => {
 };
 
 // ====================== TABS ======================
+// `short`: etichetta per la bottom nav mobile, dove lo spazio è ~70px per voce.
 const TABS = [
-  { id: "overview",    label: "Overview",        icon: LayoutDashboard },
-  { id: "portfolio",   label: "Portafoglio",     icon: Briefcase },
-  { id: "projection",  label: "Proiezione",      icon: LineChartIcon },
-  { id: "rebalancing", label: "Ribilanciamento", icon: Target },
-  { id: "settings",    label: "Impostazioni",    icon: Settings },
+  { id: "overview",    label: "Overview",        short: "Overview",  icon: LayoutDashboard },
+  { id: "portfolio",   label: "Portafoglio",     short: "Portaf.",   icon: Briefcase },
+  { id: "projection",  label: "Proiezione",      short: "Proiez.",   icon: LineChartIcon },
+  { id: "rebalancing", label: "Ribilanciamento", short: "Ribil.",    icon: Target },
+  { id: "settings",    label: "Impostazioni",    short: "Impost.",   icon: Settings },
 ];
 
 // ====================== MAIN APP ======================
@@ -2849,6 +2850,21 @@ const refreshGoldPrices = useCallback(async () => {
         {tab === "rebalancing" && renderRebalancing()}
         {tab === "settings"    && renderSettings()}
       </main>
+
+      {/* Nav mobile: la .tab-bar è nascosta sotto i 768px (vedi styles.css) */}
+      <nav className="bottom-nav">
+        <div className="bottom-nav-inner">
+          {visibleTabs.map((t) => {
+            const Icon = t.icon;
+            return (
+              <button key={t.id} className={`bottom-nav-btn ${tab === t.id ? "active" : ""}`}
+                onClick={() => { setTab(t.id); window.scrollTo(0, 0); }} aria-label={t.label}>
+                <Icon size={19}/> <span>{t.short}</span>
+              </button>
+            );
+          })}
+        </div>
+      </nav>
 
       {/* Modali */}
       {assetModal !== null && (

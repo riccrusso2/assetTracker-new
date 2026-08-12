@@ -79,7 +79,8 @@ describe("vista condivisa (read-only)", () => {
     expect(screen.queryByRole("button", { name: /snapshot mensile/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /aggiorna prezzi/i })).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: /portafoglio/i }));
+    // Due nav (tab bar desktop + bottom nav mobile) → due bottoni per tab.
+    await userEvent.click(screen.getAllByRole("button", { name: /portafoglio/i })[0]);
 
     expect(await screen.findByText("MSCI World")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /aggiungi asset/i })).not.toBeInTheDocument();
@@ -111,7 +112,7 @@ describe("proprietario autenticato", () => {
 
     expect(await screen.findByRole("button", { name: /condividi/i })).toBeInTheDocument();
     expect(screen.queryByText(/sola lettura/i)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /impostazioni/i })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /impostazioni/i })).toHaveLength(2);
   }, 10000);
 
   // Regressione: un GET /api/config fallito veniva trattato come "nessun
