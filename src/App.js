@@ -601,16 +601,24 @@ const StartupModal = ({ startup, onSave, onClose }) => {
 };
 
 // ---- Modal Gold ETF ----
-const GoldEtfModal = ({ goldEtf, onSave, onClose }) => {
+// etfTargetOthers: somma dei target degli altri asset del sotto-portafoglio ETF.
+const GoldEtfModal = ({ goldEtf, etfTargetOthers = 0, onSave, onClose }) => {
   const [form, setForm] = useState({ ...goldEtf });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
+  const onTotal    = isTotalTargetAsset(form);
+  const target     = parseFloat(form.targetWeight) || 0;
+  const targetLeft = r2(100 - etfTargetOthers);
+  const targetOver = !onTotal && target > targetLeft;
+
   const handleSave = () => {
+    if (targetOver) return;
     onSave({
       ...form,
       quantity:     parseFloat(form.quantity)     || 0,
       costBasis:    parseFloat(form.costBasis)    || 0,
-      targetWeight: parseFloat(form.targetWeight) || 0,
+      targetWeight: target,
+      targetOnTotal: onTotal,
     });
     onClose();
   };
@@ -639,13 +647,28 @@ const GoldEtfModal = ({ goldEtf, onSave, onClose }) => {
           <label className="field-label">Peso target (%)
             <input type="number" step="any" value={form.targetWeight} onChange={(e) => set("targetWeight", e.target.value)} className="field-input"/>
           </label>
+          <label className="field-label">
+            Il target si riferisce a
+            <select value={onTotal ? "total" : "etf"} className="field-input"
+              onChange={(e) => set("targetOnTotal", e.target.value === "total")}>
+              <option value="etf">Sotto-portafoglio ETF &amp; Asset quotati</option>
+              <option value="total">Patrimonio totale (liquidità, ETF, startup, oro)</option>
+            </select>
+          </label>
+          <p className="hint-text" style={{ marginTop: 0, color: targetOver ? "var(--red)" : undefined }}>
+            {onTotal
+              ? "Il peso considera ETF oro + oro fisico sull'intero patrimonio. Con molta liquidità l'oro risulta spesso sottopesato e il budget mensile va prima tutto qui."
+              : targetOver
+                ? `⚠ Target massimo ${targetLeft}%: gli altri asset quotati ne occupano già ${etfTargetOthers}% e la somma non può superare 100%.`
+                : `Il target è calcolato sul solo sotto-portafoglio ETF (es. 90% globale / 10% oro), indipendente da liquidità e startup. L'oro fisico non entra nel calcolo: conta solo l'ETF quotato. Target disponibile: ${targetLeft}% (altri asset: ${etfTargetOthers}%).`}
+          </p>
           <p className="hint-text" style={{ marginTop: 0 }}>
             Il prezzo viene aggiornato automaticamente via JustETF usando l'ISIN inserito.
           </p>
         </div>
         <div className="modal-footer">
           <button className="btn btn-ghost" onClick={onClose}>Annulla</button>
-          <button className="btn btn-primary" onClick={handleSave}>
+          <button className="btn btn-primary" onClick={handleSave} disabled={targetOver}>
             <CheckCircle size={15}/> Salva
           </button>
         </div>
@@ -1132,16 +1155,26 @@ const refreshGoldPrices = useCallback(async () => {
   // Split: asset con target sul patrimonio totale (es. Bitcoin) vs ETF classici
   const etfAssets = useMemo(() => assets.filter((a) => !isTotalTargetAsset(a)), [assets]);
   const totalTargetAssets = useMemo(() => assets.filter(isTotalTargetAsset), [assets]);
-  const etfSubTotal = useMemo(
-    () => etfAssets.reduce((s, a) => s + (a.lastPrice || 0) * (a.quantity || 0), 0),
-    [etfAssets]);
   const totalTargetValue = useMemo(
     () => totalTargetAssets.reduce((s, a) => s + (a.lastPrice || 0) * (a.quantity || 0), 0),
     [totalTargetAssets]);
+
+  // L'ETF oro può avere il target sul patrimonio (default, come da sempre) oppure
+  // sul solo sotto-portafoglio ETF (es. 90% globale / 10% oro). Nel secondo caso
+  // entra a tutti gli effetti fra gli ETF: stesso peso, stesso livello 2 del
+  // ribilanciamento. L'oro fisico non entra mai nel sotto-portafoglio — non è
+  // quotato né acquistabile col budget mensile.
+  const goldOnTotal = isTotalTargetAsset(goldEtf);
+  const etfPortfolioAssets = useMemo(
+    () => (goldOnTotal || !goldEtf.identifier ? etfAssets : [...etfAssets, goldEtf]),
+    [etfAssets, goldEtf, goldOnTotal]);
+  const etfSubTotal = useMemo(
+    () => etfPortfolioAssets.reduce((s, a) => s + (a.lastPrice || 0) * (a.quantity || 0), 0),
+    [etfPortfolioAssets]);
   // Somma dei target del sotto-portafoglio ETF: non deve mai superare 100%.
   const etfTargetSum = useMemo(
-    () => r2(etfAssets.reduce((s, a) => s + (a.targetWeight || 0), 0)),
-    [etfAssets]);
+    () => r2(etfPortfolioAssets.reduce((s, a) => s + (a.targetWeight || 0), 0)),
+    [etfPortfolioAssets]);
 
   const classDist = useMemo(() => calcClassDist(assets), [assets]);
   const goldEtfValue = useMemo(() =>
@@ -1183,6 +1216,12 @@ const refreshGoldPrices = useCallback(async () => {
   const suAbbonamenti = startupStats.subscription;
   const grandTotal = totals.val + totalCash + physGoldValue + suTotal;
 
+  // Peso dell'oro nella base coerente col suo target: sul patrimonio conta la
+  // posizione intera (ETF + fisico), sul sotto-portafoglio ETF solo l'ETF quotato.
+  const goldPct = goldOnTotal
+    ? (grandTotal > 0 && goldTotal > 0 ? (goldTotal / grandTotal) * 100 : null)
+    : (etfSubTotal > 0 && goldEtfValue > 0 ? (goldEtfValue / etfSubTotal) * 100 : null);
+
   // Variazione patrimonio vs ultimo snapshot chiuso (mese corrente escluso: è auto-aggiornato).
   const monthDelta = useMemo(() => {
     const now = new Date(), m = now.getMonth() + 1, y = now.getFullYear();
@@ -1204,28 +1243,29 @@ const refreshGoldPrices = useCallback(async () => {
   }, [classDist, suTotal, goldTotal, totalCash]);
 
   // Drift a due livelli:
-  // - ETF: peso effettivo vs sotto-portafoglio ETF (senza oro né asset a target totale)
-  // - Oro / Bitcoin: peso effettivo vs grandTotal (intero patrimonio)
+  // - ETF: peso effettivo vs sotto-portafoglio ETF (incluso l'ETF oro se il suo
+  //   target è ETF-relative, mai l'oro fisico)
+  // - Oro / Bitcoin a target sul patrimonio: peso effettivo vs grandTotal
   const drift = useMemo(() => {
-    const etfDrift = etfAssets.reduce((acc, a) => {
+    const etfDrift = etfPortfolioAssets.reduce((acc, a) => {
       const v = (a.lastPrice || 0) * (a.quantity || 0);
       const actual = etfSubTotal > 0 ? (v / etfSubTotal) * 100 : 0;
       return acc + Math.abs(actual - (a.targetWeight || 0));
     }, 0);
     const goldActual = grandTotal > 0 ? ((goldEtfValue + physGoldValue) / grandTotal) * 100 : 0;
-    const goldDrift  = goldEtf.identifier ? Math.abs(goldActual - (goldEtf.targetWeight || 0)) : 0;
+    const goldDrift  = goldOnTotal && goldEtf.identifier ? Math.abs(goldActual - (goldEtf.targetWeight || 0)) : 0;
     const ttDrift = totalTargetAssets.reduce((acc, a) => {
       const v = (a.lastPrice || 0) * (a.quantity || 0);
       const actual = grandTotal > 0 ? (v / grandTotal) * 100 : 0;
       return acc + Math.abs(actual - (a.targetWeight || 0));
     }, 0);
     return etfDrift + goldDrift + ttDrift;
-  }, [etfAssets, totalTargetAssets, etfSubTotal, goldEtfValue, physGoldValue, grandTotal, goldEtf]);
+  }, [etfPortfolioAssets, totalTargetAssets, etfSubTotal, goldEtfValue, physGoldValue, grandTotal, goldEtf, goldOnTotal]);
 
   // Livello 1: oro (ETF + fisico) + asset a target totale (Bitcoin, …)
   const rebalanceTwoLevel = useMemo(() => {
     const items = [];
-    if (goldEtf.identifier && goldEtf.lastPrice) {
+    if (goldOnTotal && goldEtf.identifier && goldEtf.lastPrice) {
       items.push({
         id: goldEtf.id, name: goldEtf.name, kind: "gold",
         targetPct: goldEtf.targetWeight || 0,
@@ -1242,8 +1282,8 @@ const refreshGoldPrices = useCallback(async () => {
         price: a.lastPrice,
       });
     });
-    return calcRebalancingTwoLevel(etfAssets, items, grandTotal, etfSubTotal, monthBudget);
-  }, [etfAssets, totalTargetAssets, goldEtf, goldEtfValue, physGoldValue, grandTotal, etfSubTotal, monthBudget]);
+    return calcRebalancingTwoLevel(etfPortfolioAssets, items, grandTotal, etfSubTotal, monthBudget);
+  }, [etfPortfolioAssets, totalTargetAssets, goldEtf, goldEtfValue, physGoldValue, grandTotal, etfSubTotal, monthBudget, goldOnTotal]);
 
   const projData = useMemo(() => calcProjectionScenarios(grandTotal, projMonthly, projReturn, projYears),
     [grandTotal, projMonthly, projReturn, projYears]);
@@ -1961,6 +2001,21 @@ const refreshGoldPrices = useCallback(async () => {
                   })}
                 </tbody>
                 <tfoot>
+                  {/* L'ETF oro col target ETF-relative pesa sul sotto-portafoglio
+                      pur restando nella sezione Oro & Bitcoin: qui in chiaro,
+                      altrimenti totale e somma target non tornerebbero. */}
+                  {!goldOnTotal && goldEtf.identifier && (
+                    <tr className="total-row" style={{ opacity: 0.75 }}>
+                      <td colSpan={5}>{goldEtf.name} <span className="muted">(sezione Oro &amp; Bitcoin)</span></td>
+                      <td className="num mono">{goldEtfValue > 0 ? fmt(goldEtfValue) : "—"}</td>
+                      <td colSpan={2}></td>
+                      <td className="num mono">{goldPct != null ? `${goldPct.toFixed(1)}%` : "—"}</td>
+                      <td className="num">
+                        <span className="target-badge ok">{goldEtf.targetWeight || 0}%</span>
+                      </td>
+                      <td colSpan={2}></td>
+                    </tr>
+                  )}
                   <tr className="total-row">
                     <td colSpan={5}><strong>Totale</strong></td>
                     <td className="num mono"><strong>{fmt(etfSubTotal)}</strong></td>
@@ -1984,8 +2039,10 @@ const refreshGoldPrices = useCallback(async () => {
               </div>
             )}
             <p className="hint-text" style={{ marginTop: 8 }}>
-              <strong>Peso</strong>: % sul totale ETF & Asset (escluso oro e Bitcoin) — la somma è sempre 100%.
+              <strong>Peso</strong>: % sul totale ETF & Asset quotati — la somma è sempre 100%.
               {" "}<strong>Target</strong>: obiettivo in % del sotto-portafoglio ETF — la somma non può superare 100%.
+              {!goldOnTotal && goldEtf.identifier &&
+                " L'ETF oro ha il target sul sotto-portafoglio: è conteggiato nei totali qui sotto, ma resta nella sezione Oro & Bitcoin."}
             </p>
           </>
         )}
@@ -2090,19 +2147,19 @@ const refreshGoldPrices = useCallback(async () => {
                         {goldEtf.lastPrice && goldEtf.costBasis
                           ? <Badge value={goldEtfPerfPct}/> : "—"}
                       </td>
-                      {/* Peso oro (ETF + fisico) vs patrimonio totale */}
-                      <td className="num mono">
-                        {grandTotal > 0 && goldTotal > 0
-                          ? `${((goldTotal / grandTotal) * 100).toFixed(2)}%`
-                          : "—"}
+                      {/* Peso: ETF + fisico sul patrimonio, oppure solo ETF sul
+                          sotto-portafoglio quotato, secondo la modalità scelta. */}
+                      <td className="num mono" title={goldOnTotal ? "ETF oro + oro fisico sul patrimonio totale" : "Solo ETF oro sul sotto-portafoglio ETF"}>
+                        {goldPct != null ? `${goldPct.toFixed(2)}%` : "—"}
+                        <span className="muted" style={{ fontSize: 10 }}>{goldOnTotal ? " tot" : " etf"}</span>
                       </td>
                       <td className="num">
                         {(() => {
-                          const goldPct = grandTotal > 0 ? (goldTotal / grandTotal) * 100 : 0;
-                          const tgt     = goldEtf.targetWeight || 0;
-                          const diff    = goldPct - tgt;
+                          const tgt  = goldEtf.targetWeight || 0;
+                          const diff = (goldPct ?? 0) - tgt;
                           return (
-                            <span className={`target-badge ${Math.abs(diff) > 3 ? (diff > 0 ? "over" : "under") : "ok"}`}>
+                            <span className={`target-badge ${Math.abs(diff) > 3 ? (diff > 0 ? "over" : "under") : "ok"}`}
+                              title={goldOnTotal ? "Target % sul patrimonio totale" : "Target % sul sotto-portafoglio ETF"}>
                               {tgt}%
                             </span>
                           );
@@ -2113,8 +2170,11 @@ const refreshGoldPrices = useCallback(async () => {
                 </table>
               </div>
               <p className="hint-text" style={{ marginTop: 6 }}>
-                <strong>Peso</strong>: (ETF oro + oro fisico) in % sul patrimonio totale.
-                {" "}<strong>Target</strong>: obiettivo % sul patrimonio totale.
+                {goldOnTotal
+                  ? <><strong>Peso</strong>: (ETF oro + oro fisico) in % sul patrimonio totale.
+                      {" "}<strong>Target</strong>: obiettivo % sul patrimonio totale. Modificabile dalla matita.</>
+                  : <><strong>Peso</strong> e <strong>Target</strong>: % sul sotto-portafoglio ETF & Asset quotati, di cui l'ETF oro fa parte
+                      (es. 90% globale / 10% oro). L'oro fisico non entra nel calcolo.</>}
               </p>
             </>
           )}
@@ -2579,7 +2639,7 @@ const refreshGoldPrices = useCallback(async () => {
 
     return (
       <div className="tab-content">
-        {assets.length === 0 ? (
+        {assets.length === 0 && !goldEtf.identifier ? (
           <EmptyState icon={Target} title="Nessun asset da ribilanciare"
             description="Aggiungi asset con pesi target nella sezione Portafoglio per vedere i suggerimenti di ribilanciamento."/>
         ) : (
@@ -2609,13 +2669,15 @@ const refreshGoldPrices = useCallback(async () => {
                 <KpiCard
                   label="📈 Budget ETF & Asset"
                   value={fmt(etfBudget)}
-                  sub={`${etfAssets.length} asset`}
+                  sub={`${etfPortfolioAssets.length} asset`}
                   color="blue"
                 />
                 <KpiCard
                   label="💼 Totale"
                   value={fmt(monthBudget)}
-                  sub={allAtTarget ? "Oro/Bitcoin al target → tutto agli ETF" : "Prima oro e Bitcoin, poi ETF"}
+                  sub={itemBuys.length === 0
+                    ? "Nessun target sul patrimonio → tutto agli ETF"
+                    : allAtTarget ? "Oro/Bitcoin al target → tutto agli ETF" : "Prima oro e Bitcoin, poi ETF"}
                   color="blue"
                 />
               </div>
@@ -2640,7 +2702,7 @@ const refreshGoldPrices = useCallback(async () => {
                 <h3 className="section-title" style={{ marginBottom: 4 }}>🥇 Target sul patrimonio totale — Oro & Bitcoin</h3>
                 <p className="hint-text" style={{ marginBottom: 12 }}>
                   Questi asset hanno il target espresso in % del <strong>patrimonio totale</strong> (liquidità + ETF + startup + oro).
-                  Il peso dell'oro considera ETF oro + oro fisico; il budget va solo sull'ETF oro (l'oro fisico è illiquido).
+                  {goldOnTotal && " Il peso dell'oro considera ETF oro + oro fisico; il budget va solo sull'ETF oro (l'oro fisico è illiquido)."}
                 </p>
                 <div className="table-wrap">
                   <table className="data-table">
@@ -2726,7 +2788,8 @@ const refreshGoldPrices = useCallback(async () => {
                 </table>
               </div>
               <p className="hint-text">
-                I pesi (Peso attuale e Target) sono calcolati all'interno del sotto-portafoglio ETF (escluso oro),
+                I pesi (Peso attuale e Target) sono calcolati all'interno del sotto-portafoglio ETF
+                {goldOnTotal ? " (escluso oro)" : " (ETF oro incluso, oro fisico escluso)"},
                 quindi sommano a 100%. Il budget viene allocato prioritariamente agli asset sottopesati, senza mai vendere.
               </p>
             </div>
@@ -2888,7 +2951,9 @@ const refreshGoldPrices = useCallback(async () => {
         <StartupModal startup={startupModal?.id ? startupModal : null} onSave={saveSU} onClose={() => setStartupModal(null)}/>
       )}
       {goldEtfModal && (
-        <GoldEtfModal goldEtf={goldEtf} onSave={(updated) => {
+        <GoldEtfModal goldEtf={goldEtf}
+          etfTargetOthers={r2(etfTargetSum - (goldOnTotal ? 0 : (goldEtf.targetWeight || 0)))}
+          onSave={(updated) => {
           setGoldEtf(updated);
           if (updated.identifier && isISIN(updated.identifier)) setTimeout(refreshGoldPrices, 300);
         }} onClose={() => setGoldEtfModal(false)}/>

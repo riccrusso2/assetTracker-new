@@ -10,10 +10,14 @@ export const r2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
 export const snapKey = (a) =>
   (a.name || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || a.id;
 
-// Asset con target calcolato sul PATRIMONIO TOTALE (come l'oro) invece che
-// sul sotto-portafoglio ETF. Bitcoin ETP si compra come un ETF ma la sua
-// allocazione target è una % dell'intero patrimonio.
-export const isTotalTargetAsset = (a) => a.targetOnTotal ?? a.assetClass === "Crypto";
+// Asset con target calcolato sul PATRIMONIO TOTALE invece che sul
+// sotto-portafoglio ETF. Bitcoin ETP e l'ETF oro si comprano come un ETF ma la
+// loro allocazione target è tipicamente una % dell'intero patrimonio — di qui il
+// default per Crypto e Oro. La scelta è comunque per singolo asset:
+// `targetOnTotal: false` li riporta nel sotto-portafoglio ETF (es. 90/10
+// globale-oro, indipendente da liquidità e startup).
+export const isTotalTargetAsset = (a) =>
+  a.targetOnTotal ?? (a.assetClass === "Crypto" || a.assetClass === "Oro");
 
 // Distribuzione buy-only del budget tra gli asset ETF, proporzionale ai
 // target normalizzati, senza mai vendere.

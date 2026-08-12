@@ -3,11 +3,39 @@ import {
   calcGrowthAttribution, calcStartupMetrics, calcStartupPortfolio,
 } from "./rebalance";
 
-test("Bitcoin (Crypto) è un asset a target sul patrimonio totale", () => {
+test("Bitcoin (Crypto) e ETF oro hanno per default il target sul patrimonio totale", () => {
   expect(isTotalTargetAsset({ assetClass: "Crypto" })).toBe(true);
+  expect(isTotalTargetAsset({ assetClass: "Oro" })).toBe(true);   // config oro pre-esistenti
   expect(isTotalTargetAsset({ assetClass: "ETF" })).toBe(false);
   expect(isTotalTargetAsset({ assetClass: "ETF", targetOnTotal: true })).toBe(true);
   expect(isTotalTargetAsset({ assetClass: "Crypto", targetOnTotal: false })).toBe(false);
+  expect(isTotalTargetAsset({ assetClass: "Oro", targetOnTotal: false })).toBe(false);
+});
+
+test("oro col target sul sotto-portafoglio ETF: 90/10 indipendente dalla liquidità", () => {
+  // Patrimonio 100k di cui 90k di liquidità: se l'oro avesse il target sul totale
+  // sarebbe cronicamente sottopesato e mangerebbe tutto il budget (livello 1).
+  // Con il target ETF-relative l'oro entra nel livello 2 insieme al globale.
+  const etf = [
+    { id: "w", name: "Globale", targetWeight: 90, lastPrice: 100, quantity: 90 },  // 9.000
+    { id: "g", name: "ETF Oro", targetWeight: 10, lastPrice: 50,  quantity: 10 },  //   500 → sotto
+  ];
+  const { itemBuys, etfBudget, etfRebalance } =
+    calcRebalancingTwoLevel(etf, [], 100_000, 9_500, 1_000);
+
+  expect(itemBuys).toHaveLength(0);
+  expect(etfBudget).toBe(1_000);        // niente livello 1: il budget resta agli ETF
+
+  const byId = Object.fromEntries(etfRebalance.actions.map((a) => [a.id, a]));
+  expect(byId.g.tgtW).toBeCloseTo(10, 6);   // target sui soli ETF, non sul patrimonio
+  expect(byId.g.curW).toBeCloseTo(5.26, 2);
+  // L'oro è sottopesato: prima copre il gap (450), poi il resto va pro-quota.
+  expect(byId.g.monthlyBuy).toBe(505);
+  expect(byId.w.monthlyBuy).toBe(495);
+  expect(r2(byId.g.monthlyBuy + byId.w.monthlyBuy)).toBe(1_000);
+  // Dopo l'acquisto il peso dell'oro sale dal 5,3% al 9,6%, verso il 10%.
+  const goldAfter = (500 + byId.g.monthlyBuy) / (9_500 + 1_000) * 100;
+  expect(goldAfter).toBeCloseTo(9.57, 2);
 });
 
 test("target 4% su patrimonio 100k → obiettivo 4.000€, non 4% degli ETF", () => {
