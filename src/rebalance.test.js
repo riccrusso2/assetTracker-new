@@ -174,6 +174,19 @@ test("tutte concluse: complessivo e realizzato-netto danno lo stesso verdetto fi
   expect(p.roiOverallPct).toBeCloseTo(1.49, 2);
 });
 
+test("totali di colonna: valore e P&L sommano le righe, abbonamento escluso", () => {
+  const p = calcStartupPortfolio([
+    { id: "a", invested: 10_000, fee: 500, currentValue: 12_000 },
+    { id: "b", invested: 5_000,  fee: 250, status: "exit", exitAmount: 9_000 },
+    { id: "c", invested: 3_000,  fee: 150, status: "failed" },
+  ], 468);
+  expect(p.costTot).toBe(18_900);
+  expect(p.totalValue).toBe(21_000);
+  expect(p.pnlNoSub).toBe(2_100);                     // 21.000 − 18.900, senza abbonamento
+  expect(p.pnlNoSub - p.subscription).toBe(p.pnlOverall);
+  expect(p.roiNoSubPct).toBeCloseTo(11.11, 2);
+});
+
 test("abbonamento omesso: retrocompatibile col calcolo precedente", () => {
   const rows = [{ id: "b", invested: 5_000, fee: 250, status: "exit", exitAmount: 9_000 }];
   const p = calcStartupPortfolio(rows);

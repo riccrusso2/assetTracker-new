@@ -175,14 +175,19 @@ export const calcStartupPortfolio = (startups, subscription = 0) => {
   const totalOutlay  = r2(investedTot + feesTot + sub);  // tutto ciò che è uscito di tasca
   const totalValue   = r2(recoveredTot + activeValue);   // tutto ciò che è rientrato o vale ancora
   const pnlOverall   = r2(totalValue - totalOutlay);
+  // Somma delle sole colonne della tabella (abbonamento escluso: è un costo comune
+  // che non appartiene a nessuna riga).
+  const costTot      = r2(investedTot + feesTot);
+  const pnlNoSub     = r2(totalValue - costTot);
   // Quando tutte sono chiuse activeValue è 0: complessivo e realizzato-netto convergono.
   const pnlRealizedNet = r2(pnlTot - sub);
   const realizedBase   = r2(closedCost + sub);
 
   return {
     rows, active, closed,
-    investedTot, feesTot,
-    costTot:    r2(investedTot + feesTot),
+    investedTot, feesTot, costTot,
+    pnlNoSub,
+    roiNoSubPct: costTot > 0 ? r2((pnlNoSub / costTot) * 100) : null,
     activeVal, activeValue, closedCost, recoveredTot,
     failedLoss: sum(failed, (s) => s.totalCost),
     pnlTot,

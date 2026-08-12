@@ -432,22 +432,30 @@ const AssetClassModal = ({ classes, onSave, onClose }) => {
 };
 
 // ---- Modal ETF / Asset ----
-const AssetModal = ({ asset, assetClasses, onSave, onClose }) => {
-  const [form, setForm] = useState(asset || {
+// etfTargetOthers: somma dei target degli altri asset del sotto-portafoglio ETF
+// (escluso quello in modifica). Il totale non può superare 100%.
+const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, onSave, onClose }) => {
+  const [form, setForm] = useState({
     name: "", identifier: "", quantity: "", costBasis: "",
     targetWeight: "", assetClass: assetClasses[0] || "ETF", currency: "EUR",
+    ...asset,
   });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
+  const onTotal    = form.targetOnTotal ?? form.assetClass === "Crypto";
+  const target     = parseFloat(form.targetWeight) || 0;
+  const targetLeft = r2(100 - etfTargetOthers);
+  const targetOver = !onTotal && target > targetLeft;
+
   const handleSave = () => {
-    if (!form.name || !form.quantity || !form.costBasis) return;
+    if (!form.name || !form.quantity || !form.costBasis || targetOver) return;
     onSave({
       ...form,
       id:           form.id || uid(),
       quantity:     parseFloat(form.quantity)     || 0,
       costBasis:    parseFloat(form.costBasis)    || 0,
-      targetWeight: parseFloat(form.targetWeight) || 0,
-      targetOnTotal: form.targetOnTotal ?? form.assetClass === "Crypto",
+      targetWeight: target,
+      targetOnTotal: onTotal,
       lastPrice:    form.lastPrice ?? null,
       lastUpdated:  form.lastUpdated ?? null,
     });
@@ -483,18 +491,25 @@ const AssetModal = ({ asset, assetClasses, onSave, onClose }) => {
           </label>
           <label className="field-label" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
             <input type="checkbox" style={{ width: "auto" }}
-              checked={form.targetOnTotal ?? form.assetClass === "Crypto"}
+              checked={onTotal}
               onChange={(e) => set("targetOnTotal", e.target.checked)}/>
             Target in % del patrimonio totale (come l'oro)
           </label>
+          {!onTotal && (
+            <p className="hint-text" style={{ marginTop: 0, color: targetOver ? "var(--red)" : undefined }}>
+              {targetOver
+                ? `⚠ Target massimo ${targetLeft}%: gli altri asset ne occupano già ${etfTargetOthers}% e la somma non può superare 100%.`
+                : `Target disponibile: ${targetLeft}% (altri asset: ${etfTargetOthers}%).`}
+            </p>
+          )}
           <p className="hint-text" style={{ marginTop: 0 }}>
             Se inserisci un ISIN valido, il prezzo sarà aggiornato automaticamente via JustETF.
-            {" "}Con la spunta attiva, il peso target è calcolato sull'intero patrimonio (liquidità, ETF, startup, oro) invece che sul solo sotto-portafoglio ETF — utile per Bitcoin.
+            {" "}Con la spunta attiva, il peso target è calcolato sull'intero patrimonio (liquidità, ETF, startup, oro) invece che sul solo sotto-portafoglio ETF — utile per Bitcoin, che finisce nella sezione <strong>Oro &amp; Bitcoin</strong>.
           </p>
         </div>
         <div className="modal-footer">
           <button className="btn btn-ghost" onClick={onClose}>Annulla</button>
-          <button className="btn btn-primary" onClick={handleSave} disabled={!form.name || !form.quantity || !form.costBasis}>
+          <button className="btn btn-primary" onClick={handleSave} disabled={!form.name || !form.quantity || !form.costBasis || targetOver}>
             <CheckCircle size={15}/> Salva
           </button>
         </div>
@@ -1111,13 +1126,19 @@ const refreshGoldPrices = useCallback(async () => {
 
   // ---- Derived ----
   const totals = useMemo(() => calcTotals(assets, goldEtf), [assets, goldEtf]);
-  const assetTotals = useMemo(() => calcTotals(assets, null), [assets]);
 
   // Split: asset con target sul patrimonio totale (es. Bitcoin) vs ETF classici
   const etfAssets = useMemo(() => assets.filter((a) => !isTotalTargetAsset(a)), [assets]);
   const totalTargetAssets = useMemo(() => assets.filter(isTotalTargetAsset), [assets]);
   const etfSubTotal = useMemo(
     () => etfAssets.reduce((s, a) => s + (a.lastPrice || 0) * (a.quantity || 0), 0),
+    [etfAssets]);
+  const totalTargetValue = useMemo(
+    () => totalTargetAssets.reduce((s, a) => s + (a.lastPrice || 0) * (a.quantity || 0), 0),
+    [totalTargetAssets]);
+  // Somma dei target del sotto-portafoglio ETF: non deve mai superare 100%.
+  const etfTargetSum = useMemo(
+    () => r2(etfAssets.reduce((s, a) => s + (a.targetWeight || 0), 0)),
     [etfAssets]);
 
   const classDist = useMemo(() => calcClassDist(assets), [assets]);
@@ -1146,6 +1167,8 @@ const refreshGoldPrices = useCallback(async () => {
     [physGold]);
 
   const goldTotal = goldEtfValue + physGoldValue;
+  // Totale della sezione Oro & Bitcoin (oro + asset a target sul patrimonio)
+  const goldBtcTotal = r2(goldTotal + totalTargetValue);
 
   // Le startup concluse (exit/failed) escono dal patrimonio: l'incasso di un'exit
   // va registrato manualmente in liquidità.
@@ -1291,13 +1314,15 @@ const refreshGoldPrices = useCallback(async () => {
   return m;
 }, [assets, goldEtf]);
 
+  // Solo gli ETF classici: gli asset a target totale (Bitcoin) vivono nella
+  // sezione Oro & Bitcoin, insieme all'oro con cui condividono la logica di peso.
   const filteredAssets = useMemo(() =>
     search.trim()
-      ? assets.filter((a) =>
+      ? etfAssets.filter((a) =>
           a.name.toLowerCase().includes(search.toLowerCase()) ||
           (a.identifier || "").toLowerCase().includes(search.toLowerCase()))
-      : assets,
-    [assets, search]);
+      : etfAssets,
+    [etfAssets, search]);
 
   // ---- Actions ----
   const fetchAllPrices = useCallback(async () => {
@@ -1841,7 +1866,7 @@ const refreshGoldPrices = useCallback(async () => {
         <div className="table-controls" style={{ marginBottom: 12 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <h2 className="section-title" style={{ margin: 0 }}><Briefcase size={16}/> ETF & Asset quotati</h2>
-            {assetTotals.val > 0 && <span className="muted" style={{ fontSize: 13 }}>Totale: <strong>{fmt(assetTotals.val)}</strong></span>}
+            {etfSubTotal > 0 && <span className="muted" style={{ fontSize: 13 }}>Totale: <strong>{fmt(etfSubTotal)}</strong></span>}
           </div>
           <div className="btn-row">
             {!readOnly && (
@@ -1849,15 +1874,15 @@ const refreshGoldPrices = useCallback(async () => {
                 <Tag size={15}/> Asset class
               </button>
             )}
-            {assets.length > 0 && (
+            {etfAssets.length > 0 && (
               <div className="search-wrap" style={{ maxWidth: 260 }}>
                 <Search size={15} className="search-icon"/>
                 <input className="search-input" placeholder="Cerca…" value={search} onChange={(e) => setSearch(e.target.value)}/>
                 {search && <button className="icon-btn" onClick={() => setSearch("")}><X size={14}/></button>}
               </div>
             )}
-            {assets.length > 0 && (
-              <button className="btn btn-ghost" onClick={() => exportCSV(assets)}><Download size={15}/> CSV</button>
+            {etfAssets.length > 0 && (
+              <button className="btn btn-ghost" onClick={() => exportCSV(etfAssets)}><Download size={15}/> CSV</button>
             )}
             {!readOnly && (
               <button className="btn btn-primary" onClick={() => setAssetModal({})}><Plus size={15}/> Aggiungi asset</button>
@@ -1865,7 +1890,7 @@ const refreshGoldPrices = useCallback(async () => {
           </div>
         </div>
 
-        {assets.length === 0 ? (
+        {etfAssets.length === 0 ? (
           <EmptyState icon={Briefcase} title="Nessun asset ancora"
             description={readOnly
               ? "Questo portafoglio non contiene asset quotati."
@@ -1890,12 +1915,10 @@ const refreshGoldPrices = useCallback(async () => {
                     const value  = a.lastPrice ? r2(a.lastPrice * (a.quantity || 0)) : 0;
                     const perfE  = a.costBasis && a.lastPrice ? r2((a.lastPrice - a.costBasis) * (a.quantity || 0)) : 0;
                     const perfP  = a.costBasis && a.lastPrice ? r2(((a.lastPrice - a.costBasis) / a.costBasis) * 100) : 0;
-                    // Peso: ETF sul sotto-portafoglio ETF; asset a target totale
-                    // (es. Bitcoin) sul patrimonio intero, come l'oro
-                    const onTotal = isTotalTargetAsset(a);
-                    const denom   = onTotal ? grandTotal : etfSubTotal;
-                    const weight  = denom > 0 ? (value / denom) * 100 : 0;
-                    const diff    = weight - (a.targetWeight || 0);
+                    // Peso sul solo sotto-portafoglio ETF (gli asset a target
+                    // sul patrimonio stanno nella sezione Oro & Bitcoin).
+                    const weight = etfSubTotal > 0 ? (value / etfSubTotal) * 100 : 0;
+                    const diff   = weight - (a.targetWeight || 0);
                     return (
                       <tr key={a.id}>
                         <td className="asset-name">
@@ -1911,12 +1934,12 @@ const refreshGoldPrices = useCallback(async () => {
                           {a.lastPrice && a.costBasis ? `${perfE >= 0 ? "+" : ""}${fmt(perfE)}` : "—"}
                         </td>
                         <td className="num">{a.lastPrice && a.costBasis ? <Badge value={perfP}/> : "—"}</td>
-                        <td className="num mono" title={onTotal ? "Peso % sul patrimonio totale" : "Peso % sul sotto-portafoglio ETF"}>
-                          {weight.toFixed(1)}%{onTotal && <span className="muted" style={{ fontSize: 10 }}> tot</span>}
+                        <td className="num mono" title="Peso % sul sotto-portafoglio ETF">
+                          {weight.toFixed(1)}%
                         </td>
                         <td className="num">
                           <span className={`target-badge ${Math.abs(diff) > 3 ? (diff > 0 ? "over" : "under") : "ok"}`}
-                            title={onTotal ? "Target % sul patrimonio totale" : "Target % sul sotto-portafoglio ETF"}>
+                            title="Target % sul sotto-portafoglio ETF">
                             {a.targetWeight || 0}%
                           </span>
                         </td>
@@ -1935,29 +1958,49 @@ const refreshGoldPrices = useCallback(async () => {
                     );
                   })}
                 </tbody>
+                <tfoot>
+                  <tr className="total-row">
+                    <td colSpan={5}><strong>Totale</strong></td>
+                    <td className="num mono"><strong>{fmt(etfSubTotal)}</strong></td>
+                    <td colSpan={2}></td>
+                    <td className="num mono"><strong>100,0%</strong></td>
+                    <td className="num">
+                      <span className={`target-badge ${etfTargetSum > 100 ? "over" : "ok"}`}
+                        title="Somma dei target: non può superare 100%">
+                        {etfTargetSum}%
+                      </span>
+                    </td>
+                    <td colSpan={2}></td>
+                  </tr>
+                </tfoot>
               </table>
             </div>
+            {etfTargetSum > 100 && (
+              <div className="alert alert-amber" style={{ marginTop: 8 }}>
+                <AlertTriangle size={14}/> La somma dei target è {etfTargetSum}%: supera il 100%.
+                Riduci i target degli asset per tornare entro il limite.
+              </div>
+            )}
             <p className="hint-text" style={{ marginTop: 8 }}>
-              <strong>Peso</strong>: % sul totale ETF & Asset (escluso oro e asset "tot") — la somma è sempre 100%.
-              {" "}<strong>Target</strong>: obiettivo in % del sotto-portafoglio ETF.
-              {" "}Gli asset marcati <strong>tot</strong> (es. Bitcoin) hanno peso e target calcolati sul <strong>patrimonio totale</strong>, come l'oro.
+              <strong>Peso</strong>: % sul totale ETF & Asset (escluso oro e Bitcoin) — la somma è sempre 100%.
+              {" "}<strong>Target</strong>: obiettivo in % del sotto-portafoglio ETF — la somma non può superare 100%.
             </p>
           </>
         )}
       </div>
-      <div className="section-card" style={{ borderColor: goldTotal > 0 ? "rgba(245,158,11,0.4)" : undefined }}>
+      <div className="section-card" style={{ borderColor: goldBtcTotal > 0 ? "rgba(245,158,11,0.4)" : undefined }}>
         {/* Header */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
             <h2 className="section-title" style={{ margin: 0 }}>
-              Oro
+              Oro &amp; Bitcoin
             </h2>
-            {goldTotal > 0 && (
+            {goldBtcTotal > 0 && (
               <div className="kpi-mini-row" style={{ marginBottom: 0 }}>
-                <span>Totale: <strong style={{ color: "var(--amber)" }}>{fmt(goldTotal)}</strong></span>
+                <span>Totale: <strong style={{ color: "var(--amber)" }}>{fmt(goldBtcTotal)}</strong></span>
                 {grandTotal > 0 && (
                   <span>
-                    <strong>{((goldTotal / grandTotal) * 100).toFixed(1)}%</strong>
+                    <strong>{((goldBtcTotal / grandTotal) * 100).toFixed(1)}%</strong>
                     <span className="muted"> del patrimonio</span>
                   </span>
                 )}
@@ -2155,6 +2198,97 @@ const refreshGoldPrices = useCallback(async () => {
             </>
           )}
         </div>
+
+        {/* ---- Bitcoin & asset con target sul patrimonio ---- */}
+        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16, marginTop: 16 }}>
+          <div className="gold-sub-header">
+            <span className="gold-sub-label">Bitcoin</span>
+            {!readOnly && (
+              <button className="icon-btn" onClick={() => setAssetModal({ targetOnTotal: true, assetClass: "Crypto" })}
+                title="Aggiungi asset con target sul patrimonio totale">
+                <Plus size={14}/>
+              </button>
+            )}
+          </div>
+
+          {totalTargetAssets.length === 0 ? (
+            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px",
+              background: "var(--bg-card2)", border: "1px dashed var(--border)",
+              borderRadius: "var(--radius-sm)", color: "var(--text-muted)" }}>
+              <span style={{ fontSize: 13 }}>
+                Nessun Bitcoin registrato.{!readOnly && " Aggiungi un ETP con target in % del patrimonio totale."}
+              </span>
+              {!readOnly && (
+                <button className="btn btn-ghost" style={{ marginLeft: "auto", padding: "4px 12px", fontSize: 12 }}
+                  onClick={() => setAssetModal({ targetOnTotal: true, assetClass: "Crypto" })}>
+                  Aggiungi
+                </button>
+              )}
+            </div>
+          ) : (
+            <>
+              <div className="table-wrap">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Nome</th><th>ISIN</th><th className="num">Quantità</th>
+                      <th className="num">P. Acquisto</th><th className="num">P. Attuale</th>
+                      <th className="num">Valore</th><th className="num">Perf €</th><th className="num">Perf %</th>
+                      <th className="num">Peso</th><th className="num">Target</th><th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {totalTargetAssets.map((a) => {
+                      const value = a.lastPrice ? r2(a.lastPrice * (a.quantity || 0)) : 0;
+                      const perfE = a.costBasis && a.lastPrice ? r2((a.lastPrice - a.costBasis) * (a.quantity || 0)) : 0;
+                      const perfP = a.costBasis && a.lastPrice ? r2(((a.lastPrice - a.costBasis) / a.costBasis) * 100) : 0;
+                      // Peso sul patrimonio totale, come l'oro
+                      const weight = grandTotal > 0 ? (value / grandTotal) * 100 : 0;
+                      const diff   = weight - (a.targetWeight || 0);
+                      return (
+                        <tr key={a.id}>
+                          <td className="asset-name">
+                            {loading[a.id] && <span className="loading-dot inline-dot"/>}
+                            {a.name}
+                          </td>
+                          <td className="mono muted">{a.identifier || "—"}</td>
+                          <td className="num mono">{a.quantity}</td>
+                          <td className="num mono">{fmt(a.costBasis)}</td>
+                          <td className="num mono">{a.lastPrice ? fmt(a.lastPrice) : <span className="muted">—</span>}</td>
+                          <td className="num mono"><strong>{value > 0 ? fmt(value) : "—"}</strong></td>
+                          <td className={`num mono ${perfE >= 0 ? "pos-text" : "neg-text"}`}>
+                            {a.lastPrice && a.costBasis ? `${perfE >= 0 ? "+" : ""}${fmt(perfE)}` : "—"}
+                          </td>
+                          <td className="num">{a.lastPrice && a.costBasis ? <Badge value={perfP}/> : "—"}</td>
+                          <td className="num mono">{value > 0 ? `${weight.toFixed(2)}%` : "—"}</td>
+                          <td className="num">
+                            <span className={`target-badge ${Math.abs(diff) > 3 ? (diff > 0 ? "over" : "under") : "ok"}`}
+                              title="Target % sul patrimonio totale">
+                              {a.targetWeight || 0}%
+                            </span>
+                          </td>
+                          <td>
+                            {!readOnly && (
+                              <div className="row-actions">
+                                <button className="icon-btn" onClick={() => setAssetModal(a)}><Edit2 size={14}/></button>
+                                <button className="icon-btn danger" onClick={() => { if (window.confirm(`Rimuovere ${a.name}?`)) deleteAsset(a.id); }}>
+                                  <Trash2 size={14}/>
+                                </button>
+                              </div>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="hint-text" style={{ marginTop: 6 }}>
+                <strong>Peso</strong> e <strong>Target</strong>: % sul patrimonio totale, come l'oro.
+              </p>
+            </>
+          )}
+        </div>
       </div>
 
       {/* Startup */}
@@ -2296,28 +2430,19 @@ const refreshGoldPrices = useCallback(async () => {
               </tbody>
               <tfoot>
                 <tr className="total-row">
-                  <td colSpan={2}><strong>Totale portafoglio startup</strong></td>
+                  <td colSpan={2}><strong>Totale</strong> <span className="muted">(abbonamento escluso)</span></td>
                   <td className="num mono"><strong>{fmt(startupStats.investedTot)}</strong></td>
                   <td className="num mono"><strong>{fmt(startupStats.feesTot)}</strong></td>
                   <td className="num mono"><strong>{fmt(startupStats.costTot)}</strong></td>
-                  <td className="num mono"><strong>{fmt(startupStats.recoveredTot)}</strong></td>
-                  <td className="num mono" style={{ color: startupStats.pnlTot >= 0 ? "var(--green)" : "var(--red)" }}>
-                    <strong>{startupStats.closed.length > 0 ? fmt(startupStats.pnlTot) : "—"}</strong>
-                  </td>
-                  <td className="num">{startupStats.roiPct != null ? <Badge value={startupStats.roiPct}/> : <span className="muted mono">—</span>}</td>
-                  <td></td>
-                </tr>
-                {/* Bilancio complessivo: include l'abbonamento e le attive a valutazione. */}
-                <tr className="total-row">
-                  <td colSpan={4}><strong>{startupStats.allClosed ? "Bilancio finale" : "Complessivo"}</strong> <span className="muted">(incluso abbonamento)</span></td>
-                  <td className="num mono"><strong>{fmt(startupStats.totalOutlay)}</strong></td>
                   <td className="num mono"><strong>{fmt(startupStats.totalValue)}</strong></td>
-                  <td className="num mono" style={{ color: startupStats.pnlOverall >= 0 ? "var(--green)" : "var(--red)" }}>
-                    <strong>{fmt(startupStats.pnlOverall)}</strong>
+                  <td className="num mono" style={{ color: startupStats.pnlNoSub >= 0 ? "var(--green)" : "var(--red)" }}>
+                    <strong>{fmt(startupStats.pnlNoSub)}</strong>
                   </td>
-                  <td className="num">{startupStats.roiOverallPct != null ? <Badge value={startupStats.roiOverallPct}/> : <span className="muted mono">—</span>}</td>
+                  <td className="num">{startupStats.roiNoSubPct != null ? <Badge value={startupStats.roiNoSubPct}/> : <span className="muted mono">—</span>}</td>
                   <td></td>
                 </tr>
+                {/* Il bilancio complessivo (abbonamento + attive a valutazione) sta
+                    già nella summary-strip in testa: qui restano i totali di colonna. */}
               </tfoot>
             </table>
           </div>
@@ -2728,8 +2853,9 @@ const refreshGoldPrices = useCallback(async () => {
       {/* Modali */}
       {assetModal !== null && (
         <AssetModal
-          asset={assetModal?.id ? assetModal : null}
+          asset={assetModal}
           assetClasses={assetClasses}
+          etfTargetOthers={r2(etfTargetSum - (assetModal?.id && !isTotalTargetAsset(assetModal) ? (assetModal.targetWeight || 0) : 0))}
           onSave={(a) => {
             saveAsset(a);
 
