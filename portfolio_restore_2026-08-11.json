@@ -1,0 +1,220 @@
+{
+  "version": 3,
+  "totalCash": 10150,
+  "assets": [
+    {
+      "id": "ftseallworld",
+      "name": "FTSE All-World USD",
+      "identifier": "IE00BK5BQT80",
+      "quantity": 94.164474,
+      "costBasis": 135.54,
+      "targetWeight": 51,
+      "lastPrice": 168.55,
+      "lastUpdated": "2026-08-11T19:42:20.766Z",
+      "assetClass": "ETF",
+      "currency": "EUR"
+    },
+    {
+      "id": "swda",
+      "name": "iShares Core MSCI World (Acc)",
+      "identifier": "IE00B4L5Y983",
+      "quantity": 41,
+      "costBasis": 115.44511,
+      "targetWeight": 14,
+      "lastPrice": 128.77,
+      "lastUpdated": "2026-08-11T19:42:20.766Z",
+      "assetClass": "ETF",
+      "currency": "EUR"
+    },
+    {
+      "id": "msciemimi",
+      "name": "iShares MSCI EM IMI",
+      "identifier": "IE00BKM4GZ66",
+      "quantity": 54,
+      "costBasis": 43.224327,
+      "targetWeight": 9,
+      "lastPrice": 46.7,
+      "lastUpdated": "2026-08-11T19:42:20.766Z",
+      "assetClass": "ETF",
+      "currency": "EUR",
+      "targetOnTotal": false
+    },
+    {
+      "id": "worldquality",
+      "name": "iShares MSCI World Quality Factor (Acc)",
+      "identifier": "IE00BP3QZ601",
+      "quantity": 38,
+      "costBasis": 68.822253,
+      "targetWeight": 8,
+      "lastPrice": 78.76,
+      "lastUpdated": "2026-08-11T19:42:20.766Z",
+      "assetClass": "ETF",
+      "currency": "EUR",
+      "chartLabel": "MSCI Quality"
+    },
+    {
+      "id": "worldmomentum",
+      "name": "iShares MSCI World Momentum Factor (Acc)",
+      "identifier": "IE00BP3QZ825",
+      "quantity": 29,
+      "costBasis": 84.631242,
+      "targetWeight": 8,
+      "lastPrice": 100.37,
+      "lastUpdated": "2026-08-11T19:42:20.766Z",
+      "assetClass": "ETF",
+      "currency": "EUR",
+      "chartLabel": "MSCI Momentum"
+    },
+    {
+      "id": "worldvalue",
+      "name": "iShares MSCI World Value Factor (Acc)",
+      "identifier": "IE00BP3QZB59",
+      "quantity": 43,
+      "costBasis": 52.510551,
+      "targetWeight": 8,
+      "lastPrice": 69.51,
+      "lastUpdated": "2026-08-11T19:42:20.766Z",
+      "assetClass": "ETF",
+      "currency": "EUR",
+      "chartLabel": "MSCI Value"
+    },
+    {
+      "id": "bitcoin",
+      "name": "Bitcoin ETP",
+      "identifier": "XS2940466316",
+      "quantity": 222,
+      "costBasis": 6.643176,
+      "targetWeight": 2,
+      "lastPrice": 5.52,
+      "lastUpdated": "2026-08-11T19:42:20.766Z",
+      "assetClass": "Crypto",
+      "currency": "EUR",
+      "targetOnTotal": true
+    }
+  ],
+  "startups": [
+    {
+      "id": "xkvehmcp",
+      "name": "Rhyde 2.0",
+      "invested": 248,
+      "fee": 19.84
+    },
+    {
+      "id": "zmnq0zus",
+      "name": "Hymalaia",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "g7sxn5jn",
+      "name": "Favikon",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "0oad7rpi",
+      "name": "Orbital Paradigm",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "wqu5pjxy",
+      "name": "Yasu",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "9pqjzwe9",
+      "name": "Reental",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "vg02d1kb",
+      "name": "Fintower",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "0wdakwh3",
+      "name": "Epic Games",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "yff2i5jd",
+      "name": "Mega",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "l9dw8q9a",
+      "name": "Aalo Atomics",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "3bvtqh4h",
+      "name": "Topo",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "a6fw4arz",
+      "name": "Perplexity",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "0c5oxmin",
+      "name": "Boardy",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "4lqn95p0",
+      "name": "Crusoe",
+      "invested": 300,
+      "fee": 24
+    },
+    {
+      "id": "h7vr1ejl",
+      "name": "Strand",
+      "invested": 300,
+      "fee": 24,
+      "abbonamento": 468
+    },
+    {
+      "id": "h9speqna",
+      "name": "Bolt",
+      "invested": 300,
+      "fee": 24
+    }
+  ],
+  "assetClasses": [
+    "ETF",
+    "Azione",
+    "Commodity",
+    "Crypto",
+    "Bond",
+    "Altro"
+  ],
+  "goldEtf": {
+    "id": "gold-etf",
+    "name": "Physical Gold USD (Acc)",
+    "identifier": "IE00B4ND3602",
+    "quantity": 33.481248,
+    "costBasis": 62.27,
+    "lastPrice": 73.71,
+    "lastUpdated": "2026-08-11T19:42:20.766Z",
+    "targetWeight": 10,
+    "assetClass": "Oro",
+    "manual": false
+  },
+  "physGold": {
+    "grams": 55.93,
+    "pricePerGram18kt": 88.04,
+    "lastUpdated": "2026-07-04T19:34:27Z"
+  },
+  "exportedAt": "2026-08-11T19:42:20.766Z"
+}

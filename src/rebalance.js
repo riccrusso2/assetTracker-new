@@ -21,7 +21,12 @@ export const isTotalTargetAsset = (a) =>
 
 // Distribuzione buy-only del budget tra gli asset ETF, proporzionale ai
 // target normalizzati, senza mai vendere.
-export const calcRebalancing = (assets, totalVal, budget) => {
+// `band`: scostamento in punti percentuali entro cui un asset si considera già
+// a posto. Serve a non inseguire il target ogni mese per mezzo punto — ogni
+// riequilibrio costa commissioni e, sui titoli, può realizzare imposte. Se
+// nessuno esce dalla banda il budget non resta fermo: si distribuisce ai pesi
+// target, che per un PAC è esattamente il comportamento voluto.
+export const calcRebalancing = (assets, totalVal, budget, band = 0) => {
   if (!totalVal || totalVal <= 0) return { actions: [] };
   const sumTarget = assets.reduce((acc, a) => acc + (a.targetWeight || 0), 0) || 1;
   const norm = 100 / sumTarget;
@@ -31,10 +36,10 @@ export const calcRebalancing = (assets, totalVal, budget) => {
     const tgtW  = (a.targetWeight || 0) * norm;
     const delta = (tgtW / 100) * totalVal - cur;
     const qty   = a.lastPrice ? delta / a.lastPrice : 0;
-    return { ...a, curW, tgtW, delta, qty };
+    return { ...a, curW, tgtW, delta, qty, inBand: tgtW - curW < band };
   });
   const buy = new Array(actions.length).fill(0);
-  let eligible = actions.map((_, i) => i).filter((i) => actions[i].delta > 0);
+  let eligible = actions.map((_, i) => i).filter((i) => actions[i].delta > 0 && !actions[i].inBand);
   let remaining = budget;
   for (let iter = 0; iter < 20 && eligible.length > 0 && remaining > 0.005; iter++) {
     const sumEligTgt = eligible.reduce((acc, i) => acc + actions[i].tgtW, 0);
@@ -51,9 +56,19 @@ export const calcRebalancing = (assets, totalVal, budget) => {
     eligible   = nextEligible;
   }
   if (remaining > 0.005) {
-    const sumAllTgt = actions.reduce((acc, a) => acc + a.tgtW, 0);
-    if (sumAllTgt > 0) actions.forEach((a, i) => { buy[i] += (a.tgtW / sumAllTgt) * remaining; });
+    // Con una banda attiva il budget avanzato va solo a chi ne è fuori:
+    // altrimenti la banda non servirebbe a nulla, si tornerebbe a comprare
+    // ogni mese anche ciò che è già a posto. Senza banda (band = 0) resta la
+    // distribuzione ai pesi target su tutti, che mantiene le proporzioni.
+    const outOfBand = actions.map((_, i) => i).filter((i) => !actions[i].inBand);
+    const idxs = band > 0 && outOfBand.length ? outOfBand : actions.map((_, i) => i);
+    const sumTgt = idxs.reduce((acc, i) => acc + actions[i].tgtW, 0);
+    if (sumTgt > 0) idxs.forEach((i) => { buy[i] += (actions[i].tgtW / sumTgt) * remaining; });
   }
+  // ponytail: il delta si misura sul totale attuale, non su totale + budget.
+  // Con la seconda base la somma dei delta coinciderebbe col budget e i pesi
+  // finirebbero esatti al primo colpo — è un miglioramento vero, ma cambia gli
+  // acquisti proposti a chiunque usi già la dashboard: da valutare a parte.
   const rawBuys = actions.map((_, i) => Math.max(0, buy[i] || 0));
   const rounded = rawBuys.map(r2);
   const roundDiff = r2(budget - rounded.reduce((a, b) => a + b, 0));
@@ -76,14 +91,15 @@ export const calcRebalancing = (assets, totalVal, budget) => {
 // items: [{ id, name, targetPct, currentVal, price }]
 //   currentVal = valore attuale ai fini del peso (per l'oro: ETF + fisico)
 //   price      = prezzo dello strumento acquistabile (per l'oro: l'ETF oro)
-export const calcRebalancingTwoLevel = (etfAssets, items, grandTotal, etfTotalVal, budget) => {
+export const calcRebalancingTwoLevel = (etfAssets, items, grandTotal, etfTotalVal, budget, band = 0) => {
   const newTotal = grandTotal + budget;
 
-  const needs = items.map((it) =>
-    it.targetPct > 0 && it.price > 0
-      ? Math.max(0, (it.targetPct / 100) * newTotal - it.currentVal)
-      : 0
-  );
+  const needs = items.map((it) => {
+    if (!(it.targetPct > 0 && it.price > 0)) return 0;
+    const curPct = grandTotal > 0 ? (it.currentVal / grandTotal) * 100 : 0;
+    if (it.targetPct - curPct < band) return 0;          // già dentro la banda
+    return Math.max(0, (it.targetPct / 100) * newTotal - it.currentVal);
+  });
   const totalNeed = needs.reduce((a, b) => a + b, 0);
   // Se il fabbisogno supera il budget, ripartizione proporzionale
   const scale = totalNeed > budget && totalNeed > 0 ? budget / totalNeed : 1;
@@ -100,7 +116,7 @@ export const calcRebalancingTwoLevel = (etfAssets, items, grandTotal, etfTotalVa
 
   const spent     = itemBuys.reduce((a, x) => a + x.buy, 0);
   const etfBudget = r2(Math.max(0, budget - spent));
-  const etfRebalance = calcRebalancing(etfAssets, etfTotalVal, etfBudget);
+  const etfRebalance = calcRebalancing(etfAssets, etfTotalVal, etfBudget, band);
 
   return { itemBuys, etfBudget, etfTotalVal, etfRebalance };
 };

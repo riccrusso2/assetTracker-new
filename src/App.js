@@ -13,13 +13,24 @@ import {
   Edit2, Moon, Sun, Download, Search, X, AlertTriangle,
   Activity, LayoutDashboard, Briefcase, Plus, CheckCircle,
   Shield, ChevronUp, ChevronDown, Wallet, Camera, Upload,
-  Settings, Tag, LogOut, Share2, Copy, Eye, Link2,
+  Settings, Tag, LogOut, Share2, Copy, Eye, Link2, ArrowLeftRight,
 } from "lucide-react";
 import "./styles.css";
 import {
   r2, snapKey, isTotalTargetAsset, calcRebalancingTwoLevel, calcGrowthAttribution,
   suStatus, calcStartupPortfolio,
 } from "./rebalance";
+import {
+  TX_TYPES, TX_LABELS, txKey, txCashFlow, holdingFor,
+  portfolioRealized, portfolioCashFlows, xirr,
+} from "./transactions";
+import {
+  calcCAGR, calcVolatility, calcMaxDrawdown, calcSharpe, calcSortino, calcReturns,
+  riskQuality, buildHistory, drawdownSeries, allocationOverTime,
+  contributionByAsset, monthlyReturnsGrid, benchmarkSeries, OBS_RELIABLE,
+  projectionScenarios, depletionYear,
+} from "./metrics";
+import { taxReport, bolloTitoli, latentTax, DEFAULT_TAX } from "./tax";
 import { apiFetch } from "./api";
 import { supabase } from "./supabaseClient";
 
@@ -33,9 +44,10 @@ const STORAGE_KEYS = {
   CASH:          "pf.cash.v2",
   ASSET_CLASSES: "pf.assetclasses.v1",
   SETTINGS:      "pf.settings.v1",
+  TRANSACTIONS:  "pf.transactions.v1",
 };
 
-const CONFIG_VERSION  = 3;
+const CONFIG_VERSION  = 4;   // v4: registro movimenti (`transactions`)
 const AUTO_REFRESH_MS = 900_000; // 15 min
 
 // Impostazioni per-utente (Fase 10). Salvate nel blob config.data, editabili da UI.
@@ -45,6 +57,12 @@ const DEFAULT_SETTINGS = {
   projReturn: 7,            // rendimento annuo % default (proiezione)
   projMonthly: 500,         // investimento mensile default (proiezione)
   projYears: 10,            // anni proiezione default
+  riskFree: 3,              // tasso privo di rischio % (Sharpe/Sortino)
+  inflation: 2,             // inflazione attesa % (proiezione in potere d'acquisto)
+  rebalanceBand: 0,         // % di scostamento tollerata prima di intervenire (0 = sempre)
+  benchmarkKey: "",         // snapKey dell'asset usato come riferimento
+  taxRate: DEFAULT_TAX.rate,
+  taxBollo: DEFAULT_TAX.bollo,
 };
 
 const MONTH_LABELS_IT = [
@@ -52,8 +70,11 @@ const MONTH_LABELS_IT = [
   "Lug","Ago","Set","Ott","Nov","Dic",
 ];
 
+// "Oro" c'è perché è la classe che l'app stessa assegna all'ETF oro
+// (GOLD_ETF_DEFAULT) ed è, con Crypto, una delle due che di default hanno il
+// target sul patrimonio totale — vedi isTotalTargetAsset in rebalance.js.
 const DEFAULT_ASSET_CLASSES = [
-  "ETF", "Azione", "Commodity", "Crypto", "Bond", "Altro",
+  "ETF", "Azione", "Commodity", "Crypto", "Oro", "Bond", "Altro",
 ];
 
 const GOLD_ETF_DEFAULT = {
@@ -111,73 +132,6 @@ const ls = {
   set: (key, val) => {
     try { localStorage.setItem(key, JSON.stringify(val)); } catch {}
   },
-};
-
-// ====================== RISK METRICS ======================
-// Rendimenti time-weighted: sottrae i flussi di cassa esterni (stipendio/PAC)
-// così i versamenti non vengono contati come guadagno.
-const calcReturns = (history) => {
-  const r = [];
-  for (let i = 1; i < history.length; i++) {
-    if (history[i - 1].v <= 0) continue;
-    r.push((history[i].v - (history[i].cf || 0) - history[i - 1].v) / history[i - 1].v);
-  }
-  return r;
-};
-
-const calcCAGR = (history) => {
-  if (history.length < 2) return null;
-  const years = (new Date(history.at(-1).t) - new Date(history[0].t)) / (365.25 * 864e5);
-  if (years <= 0) return null;
-  const r = calcReturns(history);
-  if (!r.length) return null;
-  const growth = r.reduce((acc, x) => acc * (1 + x), 1);
-  if (growth <= 0) return null;
-  return Math.pow(growth, 1 / years) - 1;
-};
-
-const calcVolatility = (history) => {
-  const r = calcReturns(history);
-  if (r.length < 2) return null;
-  const mean = r.reduce((a, b) => a + b, 0) / r.length;
-  const variance = r.reduce((a, b) => a + (b - mean) ** 2, 0) / r.length;
-  return Math.sqrt(variance * 12);
-};
-
-const calcMaxDrawdown = (history) => {
-  // Drawdown sull'indice dei rendimenti (netti dai versamenti), non sul valore lordo.
-  const r = calcReturns(history);
-  let idx = 1, peak = 1, mdd = 0;
-  for (const x of r) {
-    idx *= 1 + x;
-    if (idx > peak) peak = idx;
-    const dd = (idx - peak) / peak;
-    if (dd < mdd) mdd = dd;
-  }
-  return mdd;
-};
-
-const calcSharpe = (history, rf = 0.03) => {
-  const cagr = calcCAGR(history);
-  const vol  = calcVolatility(history);
-  if (cagr == null || vol == null || vol === 0) return null;
-  return (cagr - rf) / vol;
-};
-
-const calcSortino = (history, rf = 0.03) => {
-  const r = calcReturns(history);
-  if (r.length < 2) return null;
-
-  const meanAnn = (r.reduce((a, b) => a + b, 0) / r.length) * 12;
-  const neg = r.filter((x) => x < 0);
-  if (!neg.length) return null;
-
-  const downDev = Math.sqrt(
-    (neg.reduce((a, b) => a + b ** 2, 0) / neg.length) * 12
-  );
-
-  if (downDev === 0) return null;
-  return (meanAnn - rf) / downDev;
 };
 
 // ====================== SNAPSHOT HELPERS ======================
@@ -253,24 +207,6 @@ const calcClassDist = (assets) => {
   return Object.entries(map).map(([name, value]) => ({ name, value: r2(value) }));
 };
 
-const calcProjectionScenarios = (start, monthly, baseReturn, years) => {
-  const pessimistic = Math.max(baseReturn - 3, 0);
-  const optimistic  = baseReturn + 3;
-  const m = baseReturn / 100 / 12, mp = pessimistic / 100 / 12, mo = optimistic / 100 / 12;
-  const months = years * 12;
-  const data = [];
-  let vb = start, vp = start, vo = start;
-  for (let i = 0; i <= months; i++) {
-    if (i % 12 === 0) data.push({ year: i / 12, base: r2(vb), pessimistic: r2(vp), optimistic: r2(vo) });
-    if (i < months) {
-      vb = vb * (1 + m)  + monthly;
-      vp = vp * (1 + mp) + monthly;
-      vo = vo * (1 + mo) + monthly;
-    }
-  }
-  return data;
-};
-
 const exportCSV = (assets) => {
   const header = "Nome,ISIN,Quantità,Prezzo Acquisto,Prezzo Attuale,Valore,Perf €,Perf %,Asset Class";
   const rows = assets.map((a) => {
@@ -303,6 +239,15 @@ const seriesDash = (i) => (i >= 8 ? "6 4" : undefined);
 const C_GAIN = "#10b981";
 const C_LOSS = "#ef4444";
 const C_CONTRIB = "#3b82f6";
+
+// Cella della heatmap: intensità proporzionale al rendimento, piena intorno al
+// ±5% mensile. Oltre quella soglia un colore più carico non distingue più nulla,
+// e il numero nella cella dice comunque quanto.
+const heatStyle = (v) => {
+  if (v == null) return undefined;
+  const alpha = Math.round(Math.min(Math.abs(v) / 5, 1) * 0.5 * 255).toString(16).padStart(2, "0");
+  return { background: `${v >= 0 ? C_GAIN : C_LOSS}${alpha}` };
+};
 
 // ====================== COMPONENTS ======================
 
@@ -434,7 +379,9 @@ const AssetClassModal = ({ classes, onSave, onClose }) => {
 // ---- Modal ETF / Asset ----
 // etfTargetOthers: somma dei target degli altri asset del sotto-portafoglio ETF
 // (escluso quello in modifica). Il totale non può superare 100%.
-const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, onSave, onClose }) => {
+// fromTx: la posizione è calcolata dal registro movimenti, quindi quantità e
+// prezzo medio di carico non si toccano da qui — si correggono i movimenti.
+const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, fromTx = false, onSave, onClose }) => {
   const [form, setForm] = useState({
     name: "", identifier: "", quantity: "", costBasis: "",
     targetWeight: "", assetClass: assetClasses[0] || "ETF", currency: "EUR",
@@ -473,20 +420,31 @@ const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, onSave, onClose 
           {[
             { label: "Nome *",                  key: "name",         type: "text" },
             { label: "ISIN / Ticker",           key: "identifier",   type: "text" },
-            { label: "Quantità *",              key: "quantity",     type: "number" },
-            { label: "Prezzo medio carico (€) *", key: "costBasis",  type: "number" },
+            { label: "Quantità *",              key: "quantity",     type: "number", locked: fromTx },
+            { label: "Prezzo medio carico (€) *", key: "costBasis",  type: "number", locked: fromTx },
             { label: "Peso target (%)",         key: "targetWeight", type: "number" },
-          ].map(({ label, key, type }) => (
+          ].map(({ label, key, type, locked }) => (
             <label key={key} className="field-label">
               {label}
               <input type={type} value={form[key] ?? ""} onChange={(e) => set(key, e.target.value)}
-                className="field-input" step="any"/>
+                className="field-input" step="any" readOnly={locked}
+                title={locked ? "Calcolato dai movimenti registrati" : undefined}
+                style={locked ? { opacity: 0.6, cursor: "not-allowed" } : undefined}/>
             </label>
           ))}
+          {fromTx && (
+            <p className="hint-text" style={{ marginTop: 0 }}>
+              Quantità e prezzo medio di carico sono calcolati dai movimenti registrati:
+              per correggerli modifica il movimento nella tab <strong>Movimenti</strong>.
+            </p>
+          )}
           <label className="field-label">
             Asset Class
             <select value={form.assetClass} onChange={(e) => set("assetClass", e.target.value)} className="field-input">
-              {assetClasses.map((c) => <option key={c}>{c}</option>)}
+              {/* La classe dell'asset resta selezionabile anche se non è più
+                  nell'elenco salvato (config vecchie, classe rimossa a mano). */}
+              {[...new Set([...assetClasses, form.assetClass])].filter(Boolean)
+                .map((c) => <option key={c}>{c}</option>)}
             </select>
           </label>
           <label className="field-label">
@@ -592,6 +550,186 @@ const StartupModal = ({ startup, onSave, onClose }) => {
         <div className="modal-footer">
           <button className="btn btn-ghost" onClick={onClose}>Annulla</button>
           <button className="btn btn-primary" onClick={handleSave} disabled={!form.name || !form.invested}>
+            <CheckCircle size={15}/> Salva
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ---- Modal Snapshot ----
+// Serve a due cose che prima si facevano scrivendo JSON a mano: correggere il
+// valore di un mese e riempire un buco nella serie. `nearest` è lo snapshot da
+// cui copiare le posizioni quando se ne crea uno nuovo — senza, il mese
+// aggiunto spezzerebbe i grafici per asset.
+const SnapshotModal = ({ snap, preset, nearest, taken, onSave, onClose }) => {
+  const now = new Date();
+  const [form, setForm] = useState(snap || preset || {
+    year: now.getFullYear(), month: now.getMonth() + 1, totalValue: "",
+  });
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+  const editing = !!snap;
+
+  const year  = parseInt(form.year, 10) || 0;
+  const month = parseInt(form.month, 10) || 0;
+  const dup   = !editing && taken.has(`${year}-${month}`);
+  const valid = year > 1990 && month >= 1 && month <= 12 && `${form.totalValue}` !== "" && !dup;
+
+  const handleSave = () => {
+    if (!valid) return;
+    onSave({
+      label: `${MONTH_LABELS_IT[month - 1]} ${year}`,
+      year, month,
+      totalValue: parseFloat(form.totalValue) || 0,
+      // Le posizioni non si inventano: si riusano quelle del mese più vicino,
+      // così il flusso esterno del periodo risulta nullo invece che casuale.
+      assets: snap?.assets ?? nearest?.assets ?? [],
+    });
+    onClose();
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>{editing ? `Modifica snapshot ${snap.label}` : "Aggiungi snapshot"}</h3>
+          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+        </div>
+        <div className="modal-body">
+          <label className="field-label">Anno *
+            <input type="number" value={form.year} disabled={editing}
+              onChange={(e) => set("year", e.target.value)} className="field-input"/>
+          </label>
+          <label className="field-label">Mese *
+            <select value={form.month} disabled={editing}
+              onChange={(e) => set("month", e.target.value)} className="field-input">
+              {MONTH_LABELS_IT.map((m, i) => <option key={m} value={i + 1}>{m}</option>)}
+            </select>
+          </label>
+          <label className="field-label">Patrimonio totale (€) *
+            <input type="number" step="any" value={form.totalValue}
+              onChange={(e) => set("totalValue", e.target.value)} className="field-input"/>
+          </label>
+          {dup && (
+            <p className="hint-text" style={{ margin: 0, color: "var(--red)" }}>
+              ⚠ Esiste già uno snapshot per questo mese: modificalo invece di crearne un altro.
+            </p>
+          )}
+          {!editing && (
+            <p className="hint-text" style={{ margin: 0 }}>
+              Le posizioni per asset vengono copiate da <strong>{nearest?.label ?? "nessuno snapshot"}</strong>:
+              il mese risulterà senza versamenti né vendite. Per uno storico esatto importa il file
+              degli snapshot invece di crearlo qui.
+            </p>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button className="btn btn-ghost" onClick={onClose}>Annulla</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={!valid}>
+            <CheckCircle size={15}/> Salva
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ---- Modal Movimento ----
+// options: [{ key, name }] — gli asset quotati su cui si può registrare un
+// movimento. La chiave è quella degli snapshot (nome slugificato), non l'id.
+const TxModal = ({ tx, options, onSave, onClose }) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const [form, setForm] = useState(
+    tx?.id ? { ...tx }
+           : { date: today, assetKey: options[0]?.key || "", type: "buy",
+               quantity: "", price: "", fee: "", amount: "", notes: "" });
+  const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  // Il dividendo si registra come importo incassato: quantità e prezzo non
+  // hanno significato.
+  const isDiv = form.type === "dividend";
+  const valid = form.date && form.assetKey &&
+    (isDiv ? `${form.amount ?? ""}` !== "" : form.quantity !== "" && form.price !== "");
+
+  const preview = txCashFlow({
+    type: form.type,
+    quantity: parseFloat(form.quantity) || 0,
+    price: parseFloat(form.price) || 0,
+    amount: parseFloat(form.amount) || 0,
+    fee: parseFloat(form.fee) || 0,
+  });
+
+  const handleSave = () => {
+    if (!valid) return;
+    onSave({
+      id: form.id || uid(),
+      date: form.date,
+      assetKey: form.assetKey,
+      type: form.type,
+      quantity: isDiv ? 0 : parseFloat(form.quantity) || 0,
+      price:    isDiv ? 0 : parseFloat(form.price) || 0,
+      amount:   isDiv ? parseFloat(form.amount) || 0 : 0,
+      fee: parseFloat(form.fee) || 0,
+      notes: (form.notes || "").trim() || undefined,
+    });
+    onClose();
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>{tx?.id ? "Modifica movimento" : "Aggiungi movimento"}</h3>
+          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+        </div>
+        <div className="modal-body">
+          <label className="field-label">Data *
+            <input type="date" value={form.date} onChange={(e) => set("date", e.target.value)} className="field-input"/>
+          </label>
+          <label className="field-label">Asset *
+            <select value={form.assetKey} onChange={(e) => set("assetKey", e.target.value)} className="field-input">
+              {options.map((o) => <option key={o.key} value={o.key}>{o.name}</option>)}
+            </select>
+          </label>
+          <label className="field-label">Tipo *
+            <select value={form.type} onChange={(e) => set("type", e.target.value)} className="field-input">
+              {TX_TYPES.map((t) => <option key={t} value={t}>{TX_LABELS[t]}</option>)}
+            </select>
+          </label>
+          {isDiv ? (
+            <label className="field-label">Importo lordo incassato (€) *
+              <input type="number" step="any" value={form.amount ?? ""} onChange={(e) => set("amount", e.target.value)} className="field-input"/>
+            </label>
+          ) : (
+            <>
+              <label className="field-label">Quantità *
+                <input type="number" step="any" value={form.quantity ?? ""} onChange={(e) => set("quantity", e.target.value)} className="field-input"/>
+              </label>
+              <label className="field-label">Prezzo per quota (€) *
+                <input type="number" step="any" value={form.price ?? ""} onChange={(e) => set("price", e.target.value)} className="field-input"/>
+              </label>
+            </>
+          )}
+          <label className="field-label">{isDiv ? "Ritenuta / spese (€)" : "Commissioni (€)"}
+            <input type="number" step="any" value={form.fee ?? ""} onChange={(e) => set("fee", e.target.value)} className="field-input"/>
+          </label>
+          <label className="field-label">Note (opzionale)
+            <input type="text" value={form.notes ?? ""} onChange={(e) => set("notes", e.target.value)} className="field-input"/>
+          </label>
+          {valid && (
+            <p className="hint-text" style={{ margin: 0 }}>
+              {preview < 0
+                ? <>Esborso: <strong>{fmt(Math.abs(preview))}</strong></>
+                : <>Incasso: <strong>{fmt(preview)}</strong></>}
+              {form.type === "buy" && " — commissioni incluse nel prezzo medio di carico."}
+              {form.type === "sell" && " — il risultato realizzato è calcolato sul prezzo medio di carico del momento."}
+            </p>
+          )}
+        </div>
+        <div className="modal-footer">
+          <button className="btn btn-ghost" onClick={onClose}>Annulla</button>
+          <button className="btn btn-primary" onClick={handleSave} disabled={!valid}>
             <CheckCircle size={15}/> Salva
           </button>
         </div>
@@ -946,6 +1084,8 @@ const usePriceFetcher = () => {
 const TABS = [
   { id: "overview",    label: "Overview",        short: "Overview",  icon: LayoutDashboard },
   { id: "portfolio",   label: "Portafoglio",     short: "Portaf.",   icon: Briefcase },
+  { id: "transactions",label: "Movimenti",       short: "Movim.",    icon: ArrowLeftRight },
+  { id: "analysis",    label: "Analisi",         short: "Analisi",   icon: Activity },
   { id: "projection",  label: "Proiezione",      short: "Proiez.",   icon: LineChartIcon },
   { id: "rebalancing", label: "Ribilanciamento", short: "Ribil.",    icon: Target },
   { id: "settings",    label: "Impostazioni",    short: "Impost.",   icon: Settings },
@@ -961,13 +1101,30 @@ export default function App({ session, shareToken } = {}) {
   // cache del proprietario che apre il link nello stesso browser.
   const uid = shareToken ? `share_${shareToken}` : session?.user?.id;
   const [dark,         setDark]    = useLS(STORAGE_KEYS.DARK_MODE, true, uid);
-  const [assets,       setAssets]  = useLS(STORAGE_KEYS.ASSETS, [], uid);
+  const [storedAssets, setAssets]  = useLS(STORAGE_KEYS.ASSETS, [], uid);
   const [startups,     setSU]      = useLS(STORAGE_KEYS.STARTUP, [], uid);
   const [totalCash,    setCash]    = useLS(STORAGE_KEYS.CASH, 0, uid);
   const [assetClasses, setAC]      = useLS(STORAGE_KEYS.ASSET_CLASSES, DEFAULT_ASSET_CLASSES, uid);
-  const [goldEtf,      setGoldEtf] = useLS(STORAGE_KEYS.GOLD_ETF, GOLD_ETF_DEFAULT, uid);
+  const [storedGoldEtf, setGoldEtf]= useLS(STORAGE_KEYS.GOLD_ETF, GOLD_ETF_DEFAULT, uid);
   const [physGold,     setPhysGold]= useLS(STORAGE_KEYS.PHYS_GOLD, PHYS_GOLD_DEFAULT, uid);
   const [settings,     setSettings]= useLS(STORAGE_KEYS.SETTINGS, DEFAULT_SETTINGS, uid);
+  const [transactions, setTx]      = useLS(STORAGE_KEYS.TRANSACTIONS, [], uid);
+
+  // Un asset con movimenti registrati prende da lì quantità e prezzo medio di
+  // carico; gli altri restano com'erano stati inseriti a mano. Proiettando la
+  // posizione derivata qui, una volta sola, tutto il resto della dashboard
+  // (totali, pesi, drift, ribilanciamento, snapshot) continua a leggere gli
+  // stessi campi di prima senza sapere che esiste un registro.
+  const withHolding = (a) => {
+    const h = holdingFor(a, transactions);
+    return h.fromTx ? { ...a, quantity: h.quantity, costBasis: h.costBasis } : a;
+  };
+  const assets  = useMemo(() => storedAssets.map(withHolding),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [storedAssets, transactions]);
+  const goldEtf = useMemo(() => withHolding(storedGoldEtf),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [storedGoldEtf, transactions]);
 
   const [snapshots,      setSnapshots]    = useState([]);
   const [snapshotSaving, setSnapSaving]   = useState(false);
@@ -987,26 +1144,51 @@ export default function App({ session, shareToken } = {}) {
   const [editCash,      setEditCash]     = useState(false);
   const [cashInput,     setCashInput]    = useState("");
   const [configMsg,     setConfigMsg]    = useState(null);
+  const [txModal,       setTxModal]      = useState(null);
+  const [snapModal,     setSnapModal]    = useState(null);
 
   const [projYears,   setProjY] = useState(settings.projYears ?? 10);
   const [projReturn,  setProjR] = useState(settings.projReturn ?? 7);
   const [projMonthly, setProjM] = useState(settings.projMonthly ?? 500);
   const [monthBudget, setBudget] = useState(settings.monthlyBudget ?? 500);
+  // Fase di prelievo: si accumula per spendere, e la proiezione senza questa
+  // parte risponde a una domanda che nessuno si pone.
+  const [projWithdraw,        setProjW]   = useState(false);
+  const [projWithdrawAfter,   setProjWA]  = useState(20);
+  const [projWithdrawMonthly, setProjWM]  = useState(1500);
 
   const [goldLoading,  setGoldLoading]  = useState(false);
   const [goldPriceErr, setGoldPriceErr] = useState(null);
   
 
   const { fetchOne, loading, error } = usePriceFetcher();
-  const assetsRef  = useRef(assets);
-  const goldEtfRef = useRef(goldEtf);
-  useEffect(() => { assetsRef.current  = assets;  }, [assets]);
-  useEffect(() => { goldEtfRef.current = goldEtf; }, [goldEtf]);
+  // I ref servono all'aggiornamento prezzi, che riscrive lo stato: puntano al
+  // valore salvato, non a quello derivato dai movimenti, altrimenti le
+  // quantità calcolate finirebbero ricongelate dentro la config.
+  const assetsRef  = useRef(storedAssets);
+  const goldEtfRef = useRef(storedGoldEtf);
+  useEffect(() => { assetsRef.current  = storedAssets;  }, [storedAssets]);
+  useEffect(() => { goldEtfRef.current = storedGoldEtf; }, [storedGoldEtf]);
 
   // Dark mode
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
   }, [dark]);
+
+  // Sotto i 640px le tabelle diventano card e styles.css stampa l'etichetta di
+  // colonna con `content: attr(data-label)`. L'etichetta si copia dall'header
+  // dopo il render invece di ripeterla a mano su ogni cella delle 7 tabelle
+  // (dove verrebbe dimenticata alla prima colonna aggiunta).
+  // ponytail: scritto sul DOM perché è un attributo che React non gestisce;
+  // solo il tbody, il tfoot usa colSpan e non allinea con l'header.
+  useEffect(() => {
+    document.querySelectorAll("table.data-table").forEach((table) => {
+      const labels = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
+      table.querySelectorAll("tbody tr").forEach((tr) => {
+        [...tr.children].forEach((td, i) => { td.dataset.label = labels[i] || ""; });
+      });
+    });
+  });
 
   // Load snapshots from server (in vista condivisa arrivano da /api/public)
   useEffect(() => {
@@ -1052,6 +1234,9 @@ export default function App({ session, shareToken } = {}) {
           setAC(Array.isArray(cfg.assetClasses) ? cfg.assetClasses : DEFAULT_ASSET_CLASSES);
           setGoldEtf(cfg.goldEtf || GOLD_ETF_DEFAULT);
           setPhysGold(cfg.physGold || PHYS_GOLD_DEFAULT);
+          // Assente nelle config precedenti alla v4: il portafoglio resta
+          // quello inserito a mano finché non si registra il primo movimento.
+          setTx(Array.isArray(cfg.transactions) ? cfg.transactions : []);
           const s = { ...DEFAULT_SETTINGS, ...(cfg.settings || {}) };
           setSettings(s);
           // Seed dei controlli proiezione/budget dai default salvati
@@ -1069,6 +1254,7 @@ export default function App({ session, shareToken } = {}) {
           setGoldEtf(GOLD_ETF_DEFAULT);
           setPhysGold(PHYS_GOLD_DEFAULT);
           setSettings(DEFAULT_SETTINGS);
+          setTx([]);
         }
       })
       // configLoaded arma l'auto-save: si imposta SOLO se il caricamento è
@@ -1282,11 +1468,17 @@ const refreshGoldPrices = useCallback(async () => {
         price: a.lastPrice,
       });
     });
-    return calcRebalancingTwoLevel(etfPortfolioAssets, items, grandTotal, etfSubTotal, monthBudget);
-  }, [etfPortfolioAssets, totalTargetAssets, goldEtf, goldEtfValue, physGoldValue, grandTotal, etfSubTotal, monthBudget, goldOnTotal]);
+    return calcRebalancingTwoLevel(etfPortfolioAssets, items, grandTotal, etfSubTotal, monthBudget,
+      settings.rebalanceBand ?? 0);
+  }, [etfPortfolioAssets, totalTargetAssets, goldEtf, goldEtfValue, physGoldValue, grandTotal, etfSubTotal, monthBudget, goldOnTotal, settings.rebalanceBand]);
 
-  const projData = useMemo(() => calcProjectionScenarios(grandTotal, projMonthly, projReturn, projYears),
-    [grandTotal, projMonthly, projReturn, projYears]);
+  const projData = useMemo(() => projectionScenarios({
+    start: grandTotal, monthly: projMonthly, baseReturn: projReturn, years: projYears,
+    inflation: settings.inflation ?? 0,
+    withdrawAfter: projWithdraw ? projWithdrawAfter : null,
+    withdrawMonthly: projWithdrawMonthly,
+  }), [grandTotal, projMonthly, projReturn, projYears, settings.inflation,
+       projWithdraw, projWithdrawAfter, projWithdrawMonthly]);
 
   // La proiezione è un intervallo, non tre curve indipendenti: una banda
   // pessimistico→ottimistico più la linea dello scenario base.
@@ -1294,37 +1486,28 @@ const refreshGoldPrices = useCallback(async () => {
     () => projData.map((d) => ({ ...d, range: [d.pessimistic, d.optimistic] })),
     [projData]);
 
+  const projDepletion = useMemo(
+    () => (projWithdraw ? depletionYear(projData) : null), [projWithdraw, projData]);
   const finalVal     = projData.at(-1)?.base ?? 0;
   const totalContrib = grandTotal + projMonthly * 12 * projYears;
   const projGain     = finalVal - totalContrib;
   const projROI      = totalContrib > 0 ? (projGain / totalContrib) * 100 : 0;
 
-  const histForRisk = useMemo(() => {
-    const pts = snapshots.map((s) => ({
-      t: `${s.year}-${String(s.month).padStart(2, "0")}-01`,  // ← sempre mese/anno
-      v: s.totalValue,
-      pos: Object.fromEntries((s.assets || []).map((a) => [a.id, { q: a.quantity || 0, price: a.price || 0 }])),
-    }));
-    // Flusso esterno del periodo = variazione quantità × prezzo (versamenti/prelievi).
-    for (let i = 0; i < pts.length; i++) {
-      if (i === 0) { pts[i].cf = 0; continue; }
-      const prev = pts[i - 1].pos;
-      let cf = 0;
-      for (const [id, p] of Object.entries(pts[i].pos)) {
-        cf += (p.q - (prev[id]?.q || 0)) * p.price;
-      }
-      pts[i].cf = cf;
-    }
-    return pts;
-  }, [snapshots]);
+  const histForRisk = useMemo(() => buildHistory(snapshots), [snapshots]);
+  const riskObs = useMemo(() => calcReturns(histForRisk).length, [histForRisk]);
 
-  const riskMetrics = useMemo(() => ({
-    cagr:    calcCAGR(histForRisk),
-    vol:     calcVolatility(histForRisk),
-    mdd:     calcMaxDrawdown(histForRisk),
-    sharpe:  calcSharpe(histForRisk),
-    sortino: calcSortino(histForRisk),
-  }), [histForRisk]);
+  const riskMetrics = useMemo(() => {
+    const rf = (settings.riskFree ?? 3) / 100;
+    return {
+      cagr:    calcCAGR(histForRisk),
+      vol:     calcVolatility(histForRisk),
+      mdd:     calcMaxDrawdown(histForRisk),
+      sharpe:  calcSharpe(histForRisk, rf),
+      sortino: calcSortino(histForRisk, rf),
+      obs:     riskObs,
+      quality: riskQuality(riskObs),
+    };
+  }, [histForRisk, riskObs, settings.riskFree]);
 
   const { data: snapshotChartData, assetIds } = useMemo(() => buildChartData(snapshots), [snapshots]);
 
@@ -1336,6 +1519,112 @@ const refreshGoldPrices = useCallback(async () => {
   const patrimonioData = useMemo(
     () => snapshots.map((s) => ({ label: s.label, value: r2(s.totalValue || 0) })),
     [snapshots]);
+
+  // ---- Registro movimenti ----
+  const txOptions = useMemo(() => {
+    const list = storedAssets.map((a) => ({ key: txKey(a), name: a.name }));
+    if (storedGoldEtf.identifier || storedGoldEtf.quantity > 0) {
+      list.push({ key: txKey(storedGoldEtf), name: storedGoldEtf.name });
+    }
+    return list;
+  }, [storedAssets, storedGoldEtf]);
+
+  const txNameByKey = useMemo(
+    () => Object.fromEntries(txOptions.map((o) => [o.key, o.name])), [txOptions]);
+
+  const txSorted = useMemo(
+    () => [...transactions].sort((a, b) => (b.date || "").localeCompare(a.date || "")),
+    [transactions]);
+
+  const txRealized = useMemo(() => portfolioRealized(transactions), [transactions]);
+
+  // Flusso finale dell'XIRR: solo le posizioni che hanno un registro. Sommarci
+  // anche quelle inserite a mano gonfierebbe l'incasso finale senza i relativi
+  // esborsi, e il rendimento risulterebbe assurdo.
+  const txCurrentValue = useMemo(() => {
+    const keys = new Set(transactions.map((t) => t.assetKey));
+    return r2([...assets, goldEtf].reduce(
+      (s, a) => keys.has(txKey(a)) ? s + (a.lastPrice || 0) * (a.quantity || 0) : s, 0));
+  }, [transactions, assets, goldEtf]);
+
+  const txXirr = useMemo(() => xirr(portfolioCashFlows(
+    transactions, txCurrentValue, new Date().toISOString().slice(0, 10))),
+    [transactions, txCurrentValue]);
+
+  // ---- Analisi storiche (tutte derivate dagli snapshot) ----
+  const ddSeries      = useMemo(() => drawdownSeries(snapshots), [snapshots]);
+  const allocSeries   = useMemo(() => allocationOverTime(snapshots), [snapshots]);
+  const contribByAsset= useMemo(() => contributionByAsset(snapshots), [snapshots]);
+  const returnsGrid   = useMemo(() => monthlyReturnsGrid(snapshots), [snapshots]);
+  const benchSeries   = useMemo(
+    () => benchmarkSeries(snapshots, settings.benchmarkKey), [snapshots, settings.benchmarkKey]);
+
+  // ---- Fisco ----
+  // Metadati per chiave: servono a sapere la categoria fiscale di ogni titolo.
+  const assetMetaByKey = useMemo(() => {
+    const m = {};
+    [...assets, goldEtf].forEach((a) => { if (a?.name) m[txKey(a)] = a; });
+    return m;
+  }, [assets, goldEtf]);
+
+  const taxCfg = useMemo(() => ({
+    ...DEFAULT_TAX,
+    rate: settings.taxRate ?? DEFAULT_TAX.rate,
+    bollo: settings.taxBollo ?? DEFAULT_TAX.bollo,
+  }), [settings.taxRate, settings.taxBollo]);
+
+  const fiscal = useMemo(
+    () => taxReport(transactions, assetMetaByKey, taxCfg),
+    [transactions, assetMetaByKey, taxCfg]);
+
+  // Imposta latente: quanto resterebbe vendendo tutto oggi. Solo sulle posizioni
+  // quotate — startup e oro fisico non hanno un prezzo di mercato affidabile.
+  const latent = useMemo(() => latentTax(
+    [...assets, goldEtf]
+      .filter((a) => a?.lastPrice && a?.quantity)
+      .map((a) => ({
+        value: a.lastPrice * a.quantity,
+        cost: (a.costBasis || 0) * a.quantity,
+        asset: a,
+      })), taxCfg), [assets, goldEtf, taxCfg]);
+
+  // totals.val comprende già l'ETF oro (vedi calcTotals): sommarlo di nuovo
+  // raddoppierebbe la base del bollo.
+  const bollo = useMemo(() => bolloTitoli(totals.val, taxCfg), [totals.val, taxCfg]);
+
+  // Mesi mancanti fra il primo e l'ultimo snapshot: un buco nella serie non si
+  // vede sul grafico (i punti si toccano lo stesso) ma falsa i rendimenti,
+  // perché due mesi di variazione vengono letti come uno.
+  const snapshotGaps = useMemo(() => {
+    if (snapshots.length < 2) return [];
+    const have = new Set(snapshots.map((s) => `${s.year}-${s.month}`));
+    const last = snapshots.at(-1);
+    const out = [];
+    let { year, month } = snapshots[0];
+    for (;;) {
+      month++;
+      if (month > 12) { month = 1; year++; }
+      if (year > last.year || (year === last.year && month >= last.month)) break;
+      if (!have.has(`${year}-${month}`)) out.push({ year, month, label: `${MONTH_LABELS_IT[month - 1]} ${year}` });
+    }
+    return out;
+  }, [snapshots]);
+
+  // Scarto dal riferimento a oggi, in punti percentuali di indice.
+  const benchGap = useMemo(() => {
+    const last = benchSeries.at(-1);
+    return last && last.benchmark != null ? r2(last.portfolio - last.benchmark) : null;
+  }, [benchSeries]);
+
+  // Dividendi incassati sul costo delle posizioni che li hanno prodotti: dice
+  // quanto rende oggi il capitale investito allora, non il prezzo di mercato.
+  const yieldOnCost = useMemo(() => {
+    if (!txRealized.income) return null;
+    const keys = new Set(transactions.map((t) => t.assetKey));
+    const cost = [...assets, goldEtf].reduce(
+      (s, a) => keys.has(txKey(a)) ? s + (a.costBasis || 0) * (a.quantity || 0) : s, 0);
+    return cost > 0 ? r2((txRealized.income / cost) * 100) : null;
+  }, [txRealized.income, transactions, assets, goldEtf]);
 
   const growthAttribution = useMemo(() => calcGrowthAttribution(snapshots), [snapshots]);
   const growthTotals = useMemo(() => ({
@@ -1474,7 +1763,10 @@ const refreshGoldPrices = useCallback(async () => {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             version: CONFIG_VERSION,
-            totalCash, assets, startups, assetClasses, goldEtf, physGold, settings,
+            totalCash, startups, assetClasses, physGold, settings, transactions,
+            // Si salva sempre ciò che l'utente ha inserito, mai la posizione
+            // ricalcolata dai movimenti: il derivato si rifà a ogni load.
+            assets: storedAssets, goldEtf: storedGoldEtf,
           }),
         });
         if (!res.ok) throw new Error(`config HTTP ${res.status}`);
@@ -1500,7 +1792,8 @@ const refreshGoldPrices = useCallback(async () => {
     }, 1500);
     return () => clearTimeout(t);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [configLoaded, assets, startups, totalCash, assetClasses, goldEtf, physGold, settings]);
+  }, [configLoaded, storedAssets, startups, totalCash, assetClasses, storedGoldEtf,
+      physGold, settings, transactions]);
 
   const exportSnapshotsFile = useCallback(() => {
     const blob = new Blob([JSON.stringify(snapshots, null, 2)], { type: "application/json" });
@@ -1539,7 +1832,8 @@ const refreshGoldPrices = useCallback(async () => {
   const exportConfig = useCallback(() => {
     const config = {
       version: CONFIG_VERSION, exportedAt: new Date().toISOString(),
-      totalCash, assets, startups, assetClasses, goldEtf, physGold,
+      totalCash, startups, assetClasses, physGold, transactions,
+      assets: storedAssets, goldEtf: storedGoldEtf,
     };
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
     const a = document.createElement("a");
@@ -1548,7 +1842,7 @@ const refreshGoldPrices = useCallback(async () => {
     a.click();
     URL.revokeObjectURL(a.href);
     showCfgMsg("ok", "✓ Configurazione esportata");
-  }, [assets, startups, totalCash, assetClasses, goldEtf, physGold]);
+  }, [storedAssets, startups, totalCash, assetClasses, storedGoldEtf, physGold, transactions]);
 
   const configImportRef = useRef(null);
   const importConfig = useCallback(async (file) => {
@@ -1563,12 +1857,15 @@ const refreshGoldPrices = useCallback(async () => {
       if (Array.isArray(config.assetClasses)) setAC(config.assetClasses);
       if (config.goldEtf)  setGoldEtf(config.goldEtf);
       if (config.physGold) setPhysGold(config.physGold);
+      // Un export pre-v4 non ha il registro: si azzera, altrimenti i movimenti
+      // di un portafoglio resterebbero appiccicati a quello importato.
+      setTx(Array.isArray(config.transactions) ? config.transactions : []);
       showCfgMsg("ok", `✓ Configurazione importata (${config.exportedAt?.slice(0,10) ?? "?"})`);
     } catch (e) {
       showCfgMsg("err", `Errore: ${e.message}`);
     }
     // I setter di useLS sono setter di useState: identità stabile, deps innocue.
-  }, [setAssets, setSU, setCash, setAC, setGoldEtf, setPhysGold]);
+  }, [setAssets, setSU, setCash, setAC, setGoldEtf, setPhysGold, setTx]);
 
   const showCfgMsg = (type, text) => {
     setConfigMsg({ type, text });
@@ -1588,6 +1885,97 @@ const refreshGoldPrices = useCallback(async () => {
   const deleteAsset = (id) => setAssets((prev) => prev.filter((a) => a.id !== id));
   const deleteSU    = (id) => setSU((prev) => prev.filter((s) => s.id !== id));
 
+  // ---- Snapshot: gestione manuale ----
+  const refreshSnapshots = useCallback(async () => {
+    const updated = await apiFetch("/api/snapshots").then((r) => r.json());
+    if (Array.isArray(updated)) setSnapshots(updated);
+  }, []);
+
+  const saveSnapshotManual = useCallback(async (snap) => {
+    setSnapMsg(null);
+    try {
+      const res = await apiFetch("/api/snapshot", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(snap),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await refreshSnapshots();
+      setSnapMsg({ type: "ok", text: `✓ Snapshot "${snap.label}" salvato` });
+    } catch (e) {
+      setSnapMsg({ type: "err", text: `Errore: ${e.message}` });
+    }
+    setTimeout(() => setSnapMsg(null), 5000);
+  }, [refreshSnapshots]);
+
+  const deleteSnapshot = useCallback(async (s) => {
+    if (!window.confirm(`Eliminare lo snapshot "${s.label}"? Lo storico non è recuperabile.`)) return;
+    try {
+      const res = await apiFetch(`/api/snapshot/${s.year}/${s.month}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      await refreshSnapshots();
+    } catch (e) {
+      setSnapMsg({ type: "err", text: `Errore: ${e.message}` });
+      setTimeout(() => setSnapMsg(null), 5000);
+    }
+  }, [refreshSnapshots]);
+
+  const saveTx = (t) => setTx((prev) => {
+    const idx = prev.findIndex((x) => x.id === t.id);
+    return idx >= 0 ? prev.map((x) => x.id === t.id ? t : x) : [...prev, t];
+  });
+  const deleteTx = (id) => setTx((prev) => prev.filter((t) => t.id !== id));
+
+  // Chiude il ciclo del ribilanciamento: gli acquisti proposti diventano
+  // movimenti veri. Prima il piano restava un foglietto e le quantità si
+  // correggevano a mano, senza che nulla registrasse se era stato seguito.
+  const applyRebalance = () => {
+    const { itemBuys, etfRebalance } = rebalanceTwoLevel;
+    const date = new Date().toISOString().slice(0, 10);
+    const rows = [
+      ...itemBuys
+        .filter((it) => it.buy > 0 && it.price > 0)
+        .map((it) => ({ name: it.name, price: it.price, amount: it.buy })),
+      ...etfRebalance.actions
+        .filter((a) => a.monthlyBuy > 0 && a.lastPrice > 0)
+        .map((a) => ({ name: a.name, price: a.lastPrice, amount: a.monthlyBuy })),
+    ];
+    if (!rows.length) return;
+
+    const totale = r2(rows.reduce((s, x) => s + x.amount, 0));
+    if (!window.confirm(
+      `Registrare ${rows.length} acquisti per ${fmt(totale)} in data odierna?\n\n` +
+      rows.map((x) => `• ${x.name}: ${fmt(x.amount)}`).join("\n") +
+      "\n\nLe quantità degli asset coinvolti passeranno a essere calcolate dai movimenti."
+    )) return;
+
+    setTx((prev) => [...prev, ...rows.map((x) => ({
+      id: uid(), date, assetKey: txKey({ name: x.name }), type: "buy",
+      quantity: r2(x.amount / x.price), price: x.price, fee: 0,
+      notes: "Ribilanciamento",
+    }))]);
+    setTab("transactions");
+  };
+
+  // Punto di partenza del registro: una riga d'acquisto per ogni posizione già
+  // inserita a mano, così quantità e PMC restano identici e da lì in avanti si
+  // registrano i movimenti veri. Datata al primo snapshot, che è il momento più
+  // antico di cui la dashboard abbia memoria.
+  const seedTransactions = () => {
+    const first = snapshots[0];
+    const date = first
+      ? `${first.year}-${String(first.month).padStart(2, "0")}-01`
+      : new Date().toISOString().slice(0, 10);
+    const already = new Set(transactions.map((t) => t.assetKey));
+    const seeds = [...storedAssets, ...(storedGoldEtf.identifier ? [storedGoldEtf] : [])]
+      .filter((a) => (a.quantity || 0) > 0 && !already.has(txKey(a)))
+      .map((a) => ({
+        id: uid(), date, assetKey: txKey(a), type: "buy",
+        quantity: a.quantity, price: a.costBasis || 0, fee: 0,
+        notes: "Posizione iniziale",
+      }));
+    if (seeds.length) setTx((prev) => [...prev, ...seeds]);
+  };
+
   const isLoading = Object.keys(loading).length > 0;
   const toggleLine = (dataKey) => setHiddenLines((prev) => {
     const next = new Set(prev); next.has(dataKey) ? next.delete(dataKey) : next.add(dataKey); return next;
@@ -1595,8 +1983,12 @@ const refreshGoldPrices = useCallback(async () => {
 
   const isEmpty = assets.length === 0 && goldTotal === 0 && startups.length === 0 && totalCash === 0;
 
-  // Le impostazioni sono personali e modificabili: fuori dalla vista condivisa.
-  const visibleTabs = readOnly ? TABS.filter((t) => t.id !== "settings") : TABS;
+  // Fuori dalla vista condivisa: le impostazioni perché sono personali e
+  // modificabili, il registro movimenti perché è il dettaglio di quando e a
+  // quanto si è comprato — si condivide il portafoglio, non lo storico ordini.
+  const visibleTabs = readOnly
+    ? TABS.filter((t) => t.id !== "settings" && t.id !== "transactions")
+    : TABS;
 
   // ====================== TAB: OVERVIEW ======================
   const renderOverview = () => (
@@ -1811,29 +2203,6 @@ const refreshGoldPrices = useCallback(async () => {
             </div>
           </div>
 
-          {snapshots.length > 2 && (
-            <div className="section-card">
-              <h3 className="section-title"><Shield size={16}/> Metriche di rischio</h3>
-              <div className="grid-5">
-                <RiskCard label="CAGR"          value={riskMetrics.cagr}
-                  fmtFn={(v) => fmtPct(v * 100)} tooltip="Tasso di crescita annuo composto"
-                  quality={riskMetrics.cagr > 0.05 ? "good" : "bad"}/>
-                <RiskCard label="Volatilità"    value={riskMetrics.vol}
-                  fmtFn={(v) => fmtPct(v * 100)} tooltip="Volatilità annualizzata"
-                  quality={riskMetrics.vol < 0.2 ? "good" : "bad"}/>
-                <RiskCard label="Max Drawdown"  value={riskMetrics.mdd}
-                  fmtFn={(v) => fmtPct(v * 100)} tooltip="Perdita massima dal picco"
-                  quality={riskMetrics.mdd > -0.15 ? "good" : "bad"}/>
-                <RiskCard label="Sharpe Ratio"  value={riskMetrics.sharpe}
-                  fmtFn={(v) => v.toFixed(2)} tooltip=">1 ottimo"
-                  quality={riskMetrics.sharpe > 1 ? "good" : riskMetrics.sharpe > 0 ? "neutral" : "bad"}/>
-                <RiskCard label="Sortino Ratio" value={riskMetrics.sortino}
-                  fmtFn={(v) => v.toFixed(2)} tooltip="Penalizza solo la volatilità negativa"
-                  quality={riskMetrics.sortino > 1 ? "good" : riskMetrics.sortino > 0 ? "neutral" : "bad"}/>
-              </div>
-              <p className="hint-text">⚠ Metriche calcolate su {snapshots.length} snapshot mensili. Servono almeno 3 snapshot.</p>
-            </div>
-          )}
 
           {growthAttribution.length > 0 && (
             <div className="section-card">
@@ -2543,6 +2912,542 @@ const refreshGoldPrices = useCallback(async () => {
     </div>
   );
 
+  // ====================== TAB: ANALISI ======================
+  // Le metriche di rischio stavano in Overview, dove occupavano quanto il
+  // grafico del patrimonio pur essendo la parte che si consulta di rado. Qui
+  // stanno insieme a ciò che serve per leggerle: confronto, drawdown, chi ha
+  // prodotto il risultato, come è cambiata la composizione.
+  const renderAnalysis = () => (
+    <div className="tab-content">
+      {/* ---- Storico snapshot ---- */}
+      {!readOnly && (
+        <div className="section-card">
+          <div className="table-controls" style={{ marginBottom: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <h3 className="section-title" style={{ margin: 0 }}><Camera size={16}/> Storico snapshot</h3>
+              <span className="muted" style={{ fontSize: 13 }}>{snapshots.length} mesi</span>
+            </div>
+            <div className="btn-row">
+              <button className="btn btn-ghost" onClick={() => setSnapModal({})}>
+                <Plus size={15}/> Aggiungi mese
+              </button>
+            </div>
+          </div>
+
+          {snapshotGaps.length > 0 && (
+            <div className="alert alert-amber" style={{ marginBottom: 12 }}>
+              <AlertTriangle size={14}/>
+              <span>
+                Mancano {snapshotGaps.length} mesi nella serie ({snapshotGaps.map((g) => g.label).join(", ")}).
+                I rendimenti di quei periodi vengono attribuiti al mese successivo.
+                {" "}
+                {snapshotGaps.map((g) => (
+                  <button key={g.label} className="btn btn-ghost" style={{ padding: "2px 8px", marginRight: 4 }}
+                    onClick={() => setSnapModal({ year: g.year, month: g.month, totalValue: "" })}>
+                    + {g.label}
+                  </button>
+                ))}
+              </span>
+            </div>
+          )}
+
+          {snapshots.length === 0 ? (
+            <EmptyState icon={Camera} title="Nessuno snapshot"
+              description="Lo snapshot del mese corrente viene creato da solo a ogni modifica. Per lo storico passato puoi importare un file o aggiungere i mesi a mano."/>
+          ) : (
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Mese</th><th className="num">Patrimonio</th>
+                    <th className="num">Var.</th><th className="num">Asset</th><th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[...snapshots].reverse().map((s, i, arr) => {
+                    const prev = arr[i + 1];
+                    const delta = prev?.totalValue
+                      ? r2(((s.totalValue - prev.totalValue) / prev.totalValue) * 100) : null;
+                    return (
+                      <tr key={`${s.year}-${s.month}`}>
+                        <td className="mono">{s.label}</td>
+                        <td className="num mono"><strong>{fmt(s.totalValue)}</strong></td>
+                        <td className="num">{delta == null ? "—" : <Badge value={delta}/>}</td>
+                        <td className="num mono muted">{(s.assets || []).length}</td>
+                        <td>
+                          <div className="row-actions">
+                            <button className="icon-btn" title="Modifica il valore"
+                              onClick={() => setSnapModal(s)}><Edit2 size={14}/></button>
+                            <button className="icon-btn danger" title="Elimina"
+                              onClick={() => deleteSnapshot(s)}><Trash2 size={14}/></button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="hint-text" style={{ marginTop: 8 }}>
+            Il mese corrente si aggiorna da solo a ogni modifica del portafoglio. Modificare uno
+            snapshot passato cambia solo il patrimonio totale: le posizioni per asset restano
+            quelle salvate allora.
+          </p>
+        </div>
+      )}
+
+      {snapshots.length < 2 ? (
+        <div className="section-card">
+          <EmptyState icon={Activity} title="Servono almeno due snapshot"
+            description="Le analisi si costruiscono sullo storico mensile. Salva uno snapshot dalla tab Overview: dal secondo in poi qui comparirà il confronto con il riferimento, il drawdown e il contributo di ogni asset."/>
+        </div>
+      ) : (
+        <>
+          <div className="section-card">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+              <h3 className="section-title" style={{ margin: 0 }}><Shield size={16}/> Metriche di rischio</h3>
+              <span className={`target-badge ${riskMetrics.quality === "solido" ? "ok" : "under"}`}>
+                {riskObs} osservazioni — {riskMetrics.quality}
+              </span>
+            </div>
+            <div className="grid-5" style={{ marginTop: 12 }}>
+              <RiskCard label="CAGR"          value={riskMetrics.cagr}
+                fmtFn={(v) => fmtPct(v * 100)} tooltip="Tasso di crescita annuo composto, al netto dei versamenti"
+                quality={riskMetrics.cagr > 0.05 ? "good" : "bad"}/>
+              <RiskCard label="Volatilità"    value={riskMetrics.vol}
+                fmtFn={(v) => fmtPct(v * 100)} tooltip="Volatilità annualizzata"
+                quality={riskMetrics.vol < 0.2 ? "good" : "bad"}/>
+              <RiskCard label="Max Drawdown"  value={riskMetrics.mdd}
+                fmtFn={(v) => fmtPct(v * 100)} tooltip="Perdita massima dal picco"
+                quality={riskMetrics.mdd > -0.15 ? "good" : "bad"}/>
+              <RiskCard label="Sharpe Ratio"  value={riskMetrics.sharpe}
+                fmtFn={(v) => v.toFixed(2)} tooltip="Rendimento per unità di rischio. >1 ottimo"
+                quality={riskMetrics.sharpe > 1 ? "good" : riskMetrics.sharpe > 0 ? "neutral" : "bad"}/>
+              <RiskCard label="Sortino Ratio" value={riskMetrics.sortino}
+                fmtFn={(v) => v.toFixed(2)} tooltip="Penalizza solo la volatilità negativa"
+                quality={riskMetrics.sortino > 1 ? "good" : riskMetrics.sortino > 0 ? "neutral" : "bad"}/>
+            </div>
+            <p className="hint-text">
+              {riskObs < OBS_RELIABLE
+                ? `⚠ ${riskObs} rendimenti mensili disponibili: volatilità e rapporti sono indicativi finché non se ne accumulano ${OBS_RELIABLE}. Sotto le 12 osservazioni non vengono proprio calcolati — un numero costruito su pochi mesi dipende da quali mesi sono capitati nel campione, non dal portafoglio.`
+                : `Campione di ${riskObs} rendimenti mensili. Tasso privo di rischio: ${settings.riskFree ?? 3}% (modificabile in Impostazioni).`}
+            </p>
+          </div>
+
+          {transactions.length > 0 && (
+            <div className="section-card">
+              <h3 className="section-title"><ArrowLeftRight size={16}/> Risultato dai movimenti</h3>
+              <div className="grid-3">
+                <RiskCard label="XIRR" value={txXirr}
+                  fmtFn={(v) => fmtPct(v * 100)}
+                  tooltip="Rendimento annualizzato ponderato per i flussi: tiene conto di quando è entrato ogni euro"
+                  quality={txXirr > 0.05 ? "good" : txXirr > 0 ? "neutral" : "bad"}/>
+                <RiskCard label="P&L realizzato" value={txRealized.realized || null}
+                  fmtFn={(v) => fmt(v)}
+                  tooltip="Guadagno o perdita già incassati dalle vendite, al netto delle commissioni"
+                  quality={txRealized.realized >= 0 ? "good" : "bad"}/>
+                <RiskCard label="Dividendi incassati" value={txRealized.income || null}
+                  fmtFn={(v) => fmt(v)}
+                  tooltip="Dividendi e cedole registrati, al netto di ritenute e spese"
+                  quality="neutral"/>
+              </div>
+              <p className="hint-text">
+                Calcolate sulle sole posizioni con movimenti registrati.
+                {yieldOnCost != null && <> Rendimento da dividendi sul costo (<strong>yield on cost</strong>): <strong>{fmtPct(yieldOnCost)}</strong>.</>}
+              </p>
+            </div>
+          )}
+
+          {/* ---- Benchmark ---- */}
+          <div className="section-card">
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+              <h3 className="section-title" style={{ margin: 0 }}><Target size={16}/> Confronto con un riferimento</h3>
+              {!readOnly && (
+                <select className="field-input" style={{ maxWidth: 260, marginTop: 0 }}
+                  value={settings.benchmarkKey || ""}
+                  onChange={(e) => setSettings((p) => ({ ...p, benchmarkKey: e.target.value }))}>
+                  <option value="">Nessun riferimento</option>
+                  {txOptions.map((o) => <option key={o.key} value={o.key}>{o.name}</option>)}
+                </select>
+              )}
+            </div>
+            {benchSeries.length > 1 ? (
+              <>
+                <div style={{ height: 260, marginTop: 12 }}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={benchSeries} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>
+                      <XAxis dataKey="label" tick={{ fontSize: 11 }}/>
+                      <YAxis tick={{ fontSize: 11 }} domain={["auto", "auto"]} tickFormatter={(v) => v.toFixed(0)}/>
+                      <ReTooltip formatter={(v) => (v == null ? "—" : v.toFixed(1))}/>
+                      <ReferenceLine y={100} stroke="var(--text-muted)" strokeDasharray="4 4"/>
+                      <Line type="monotone" dataKey="portfolio" name="Patrimonio" stroke={seriesColor(0)}
+                        strokeWidth={2.2} dot={false}/>
+                      <Line type="monotone" dataKey="benchmark" name="Riferimento" stroke={seriesColor(2)}
+                        strokeWidth={2} dot={false} strokeDasharray="5 4" connectNulls/>
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="chart-legend">
+                  <span><i style={{ background: seriesColor(0) }}/> Patrimonio</span>
+                  <span><i style={{ background: seriesColor(2) }}/> {txNameByKey[settings.benchmarkKey] || "Riferimento"}</span>
+                </div>
+                <p className="hint-text">
+                  Entrambi riportati a 100 sul primo snapshot. Il patrimonio è al netto dei versamenti:
+                  qui si vede se il portafoglio ha fatto meglio o peggio del riferimento, non quanto si è risparmiato.
+                  {benchGap != null && (
+                    <> Differenza a oggi: <strong style={{ color: benchGap >= 0 ? "var(--green)" : "var(--red)" }}>
+                      {fmtPct(benchGap)}</strong>.</>
+                  )}
+                </p>
+              </>
+            ) : (
+              <p className="hint-text" style={{ marginTop: 12 }}>
+                Scegli un asset come riferimento. Se vuoi confrontarti con un indice che non possiedi,
+                aggiungilo in Portafoglio con quantità <strong>0</strong>: non entra nel patrimonio ma
+                il suo prezzo finisce negli snapshot ed è utilizzabile qui.
+              </p>
+            )}
+          </div>
+
+          {/* ---- Drawdown ---- */}
+          {ddSeries.length > 0 && (
+            <div className="section-card">
+              <h3 className="section-title"><TrendingDown size={16}/> Drawdown</h3>
+              <div style={{ height: 200 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={ddSeries} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="gDd" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor={C_LOSS} stopOpacity={0.05}/>
+                        <stop offset="100%" stopColor={C_LOSS} stopOpacity={0.35}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>
+                    <XAxis dataKey="label" tick={{ fontSize: 11 }}/>
+                    <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `${v}%`}/>
+                    <ReTooltip formatter={(v) => `${v}%`}/>
+                    <ReferenceLine y={0} stroke="var(--border)"/>
+                    <Area type="monotone" dataKey="dd" stroke={C_LOSS} fill="url(#gDd)" strokeWidth={2}/>
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="hint-text">
+                Quanto si è sotto il massimo raggiunto. Il valore peggiore dice quanto è stata profonda
+                la discesa; la larghezza della zona in rosso dice quanto è durata — che è la parte
+                che si sopporta davvero.
+              </p>
+            </div>
+          )}
+
+          {/* ---- Chi ha prodotto il risultato ---- */}
+          {contribByAsset.length > 0 && (
+            <div className="section-card">
+              <h3 className="section-title"><TrendingUp size={16}/> Contributo al risultato</h3>
+              <div style={{ height: Math.max(160, contribByAsset.length * 38) }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={contribByAsset} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false}/>
+                    <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={(v) => fmt(v, true)}/>
+                    <YAxis type="category" dataKey="key" width={110} tick={{ fontSize: 11 }}
+                      tickFormatter={(k) => assetNameMap[k] || k}/>
+                    <ReTooltip formatter={(v) => fmt(v)} labelFormatter={(k) => assetNameMap[k] || k}/>
+                    <ReferenceLine x={0} stroke="var(--border)"/>
+                    <Bar dataKey="gain" radius={[0, 4, 4, 0]}>
+                      {contribByAsset.map((d) => (
+                        <Cell key={d.key} fill={d.gain >= 0 ? C_GAIN : C_LOSS}/>
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="hint-text">
+                Euro prodotti dal mercato, al netto di quanto ci è stato versato dentro. Non coincide
+                con la performance percentuale: un asset piccolo che sale molto può contare meno di
+                uno grande che sale poco.
+              </p>
+            </div>
+          )}
+
+          {/* ---- Composizione nel tempo ---- */}
+          {allocSeries.length > 1 && (
+            <div className="section-card">
+              <h3 className="section-title"><PieChartIcon size={16}/> Composizione nel tempo</h3>
+              <div style={{ height: 240 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <AreaChart data={allocSeries} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>
+                    <XAxis dataKey="label" tick={{ fontSize: 11 }}/>
+                    <YAxis tick={{ fontSize: 11 }} domain={[0, 100]} tickFormatter={(v) => `${v}%`}/>
+                    <ReTooltip formatter={(v, k) => [`${v}%`, assetNameMap[k] || k]}/>
+                    {assetIds.map((k, i) => (
+                      <Area key={k} type="monotone" dataKey={k} stackId="alloc"
+                        stroke={seriesColor(i)} fill={seriesColor(i)} fillOpacity={0.6}/>
+                    ))}
+                  </AreaChart>
+                </ResponsiveContainer>
+              </div>
+              <p className="hint-text">
+                Peso percentuale di ogni asset quotato, mese per mese: mostra la deriva che la torta
+                di oggi non può far vedere. Liquidità, startup e oro fisico restano fuori — negli
+                snapshot ci sono solo gli asset con un prezzo.
+              </p>
+            </div>
+          )}
+
+          {/* ---- Heatmap rendimenti ---- */}
+          {returnsGrid.length > 0 && (
+            <div className="section-card">
+              <h3 className="section-title"><Activity size={16}/> Rendimenti mensili</h3>
+              <div className="table-wrap">
+                <table className="data-table heatmap">
+                  <thead>
+                    <tr>
+                      <th>Anno</th>
+                      {MONTH_LABELS_IT.map((m) => <th key={m} className="num">{m}</th>)}
+                      <th className="num">Anno</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {returnsGrid.map((row) => {
+                      const vals = Object.values(row.months);
+                      const yearRet = vals.length
+                        ? r2((vals.reduce((acc, v) => acc * (1 + v / 100), 1) - 1) * 100) : null;
+                      return (
+                        <tr key={row.year}>
+                          <td className="mono"><strong>{row.year}</strong></td>
+                          {MONTH_LABELS_IT.map((m, i) => {
+                            const v = row.months[i + 1];
+                            return (
+                              <td key={m} className="num mono" style={heatStyle(v)}>
+                                {v == null ? "" : `${v > 0 ? "+" : ""}${v.toFixed(1)}`}
+                              </td>
+                            );
+                          })}
+                          <td className={`num mono ${(yearRet ?? 0) >= 0 ? "pos-text" : "neg-text"}`}>
+                            <strong>{yearRet == null ? "—" : `${yearRet > 0 ? "+" : ""}${yearRet.toFixed(1)}%`}</strong>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <p className="hint-text">
+                Rendimento mensile al netto dei versamenti. La colonna finale compone i mesi
+                disponibili dell'anno: se l'anno è incompleto, è un parziale.
+              </p>
+            </div>
+          )}
+
+          {/* ---- Fisco ---- */}
+          {(fiscal.years.length > 0 || latent.latentGain !== 0) && (
+            <div className="section-card">
+              <h3 className="section-title"><Wallet size={16}/> Fisco</h3>
+              <div className="summary-strip" style={{ marginBottom: 12 }}>
+                <div className="ss-item">
+                  <span className="ss-label">Imposta latente</span>
+                  <span className="ss-value mono neg-text">{fmt(latent.latentTax)}</span>
+                </div>
+                <div className="ss-item">
+                  <span className="ss-label">Patrimonio netto stimato</span>
+                  <span className="ss-value mono">{fmt(grandTotal - latent.latentTax)}</span>
+                </div>
+                <div className="ss-item">
+                  <span className="ss-label">Bollo titoli / anno</span>
+                  <span className="ss-value mono">{fmt(bollo)}</span>
+                </div>
+                <div className="ss-item">
+                  <span className="ss-label">Imposta già maturata</span>
+                  <span className="ss-value mono">{fmt(fiscal.totalTax)}</span>
+                </div>
+              </div>
+
+              {fiscal.years.length > 0 && (
+                <div className="table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Anno</th>
+                        <th className="num" title="Plusvalenze da ETF: non compensabili con le minusvalenze">Redditi di capitale</th>
+                        <th className="num" title="Plusvalenze da azioni, ETC, crypto: compensabili">Redditi diversi</th>
+                        <th className="num">Minusvalenze</th>
+                        <th className="num">Compensate</th>
+                        <th className="num">Imponibile</th>
+                        <th className="num">Imposta</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {fiscal.years.map((y) => (
+                        <tr key={y.year}>
+                          <td className="mono"><strong>{y.year}</strong></td>
+                          <td className="num mono">{fmt(y.capitalGains)}</td>
+                          <td className="num mono">{fmt(y.diverseGains)}</td>
+                          <td className="num mono neg-text">{y.losses ? `−${fmt(y.losses)}` : "—"}</td>
+                          <td className="num mono">{y.offset ? fmt(y.offset) : "—"}</td>
+                          <td className="num mono">{fmt(y.taxable)}</td>
+                          <td className="num mono neg-text"><strong>{fmt(y.tax)}</strong></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {fiscal.pool.length > 0 && (
+                <div style={{ marginTop: 12 }}>
+                  <h4 style={{ fontSize: 13, margin: "0 0 6px" }}>Zainetto fiscale</h4>
+                  <div className="kpi-mini-row">
+                    {fiscal.pool.map((l) => (
+                      <span key={l.year}>
+                        {l.year}: <strong>{fmt(l.amount)}</strong>{" "}
+                        <span className="muted">(usabile fino al {l.expiresAfter})</span>
+                      </span>
+                    ))}
+                  </div>
+                  {fiscal.expiring > 0 && (
+                    <div className="alert alert-amber" style={{ marginTop: 8 }}>
+                      <AlertTriangle size={14}/> {fmt(fiscal.expiring)} di minusvalenze scadono senza
+                      essere state usate: si recuperano solo realizzando una plusvalenza compensabile
+                      (azioni, ETC, crypto — non ETF) entro il termine.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <p className="hint-text">
+                Stima in regime amministrato, con criterio <strong>LIFO</strong> sui lotti — diverso dal
+                prezzo medio di carico usato altrove per mostrare la performance. Le plusvalenze da ETF
+                armonizzati sono redditi di capitale: <strong>non</strong> si compensano con le
+                minusvalenze, nemmeno con quelle degli ETF stessi. Non sostituisce l'estratto conto
+                fiscale dell'intermediario.
+              </p>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+
+  // ====================== TAB: MOVIMENTI ======================
+  const renderTransactions = () => (
+    <div className="tab-content">
+      <div className="section-card">
+        <div className="table-controls" style={{ marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <h2 className="section-title" style={{ margin: 0 }}>
+              <ArrowLeftRight size={16}/> Movimenti
+            </h2>
+            {transactions.length > 0 && (
+              <span className="muted" style={{ fontSize: 13 }}>{transactions.length} registrati</span>
+            )}
+          </div>
+          <div className="btn-row">
+            <button className="btn btn-primary" onClick={() => setTxModal({})} disabled={!txOptions.length}>
+              <Plus size={15}/> Aggiungi movimento
+            </button>
+          </div>
+        </div>
+
+        {transactions.length === 0 ? (
+          <EmptyState icon={ArrowLeftRight} title="Nessun movimento registrato"
+            description={txOptions.length
+              ? "Finché il registro è vuoto le posizioni restano quelle inserite a mano. Registrando acquisti, vendite e dividendi la dashboard calcola da sé quantità e prezzo medio di carico, e sblocca il risultato realizzato e il rendimento ponderato per i flussi (XIRR)."
+              : "Aggiungi prima un asset dalla tab Portafoglio."}
+            action={txOptions.length ? (
+              <div className="btn-row">
+                <button className="btn btn-primary" onClick={seedTransactions}>
+                  <Upload size={15}/> Genera dalle posizioni attuali
+                </button>
+                <button className="btn btn-ghost" onClick={() => setTxModal({})}>
+                  <Plus size={15}/> Aggiungi a mano
+                </button>
+              </div>
+            ) : null}/>
+        ) : (
+          <>
+            <div className="summary-strip" style={{ marginBottom: 12 }}>
+              <div className="ss-item">
+                <span className="ss-label">Realizzato</span>
+                <span className={`ss-value mono ${txRealized.realized >= 0 ? "pos-text" : "neg-text"}`}>
+                  {fmt(txRealized.realized)}
+                </span>
+              </div>
+              <div className="ss-item">
+                <span className="ss-label">Dividendi</span>
+                <span className="ss-value mono">{fmt(txRealized.income)}</span>
+              </div>
+              <div className="ss-item">
+                <span className="ss-label">Commissioni</span>
+                <span className="ss-value mono">{fmt(txRealized.fees)}</span>
+              </div>
+              <div className="ss-item">
+                <span className="ss-label">XIRR</span>
+                <span className={`ss-value mono ${(txXirr ?? 0) >= 0 ? "pos-text" : "neg-text"}`}>
+                  {txXirr == null ? "—" : fmtPct(txXirr * 100)}
+                </span>
+              </div>
+            </div>
+
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Data</th><th>Asset</th><th>Tipo</th>
+                    <th className="num">Quantità</th><th className="num">Prezzo</th>
+                    <th className="num">Commissioni</th><th className="num">Importo</th>
+                    <th>Note</th><th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {txSorted.map((t) => {
+                    const flow = txCashFlow(t);
+                    return (
+                      <tr key={t.id}>
+                        <td className="mono">{t.date}</td>
+                        <td className="asset-name">
+                          {txNameByKey[t.assetKey] || <span className="muted">{t.assetKey}</span>}
+                        </td>
+                        <td><span className="class-tag">{TX_LABELS[t.type] || t.type}</span></td>
+                        <td className="num mono">{t.type === "dividend" ? "—" : t.quantity}</td>
+                        <td className="num mono">{t.type === "dividend" ? "—" : fmt(t.price)}</td>
+                        <td className="num mono">{t.fee ? fmt(t.fee) : "—"}</td>
+                        <td className={`num mono ${flow >= 0 ? "pos-text" : "neg-text"}`}>
+                          {flow >= 0 ? "+" : "−"}{fmt(Math.abs(flow))}
+                        </td>
+                        <td className="muted">{t.notes || "—"}</td>
+                        <td>
+                          {!readOnly && (
+                            <div className="row-actions">
+                              <button className="icon-btn" onClick={() => setTxModal(t)}><Edit2 size={14}/></button>
+                              <button className="icon-btn danger"
+                                onClick={() => { if (window.confirm("Rimuovere questo movimento?")) deleteTx(t.id); }}>
+                                <Trash2 size={14}/>
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <p className="hint-text" style={{ marginTop: 8 }}>
+              Gli asset che compaiono qui hanno quantità e prezzo medio di carico
+              <strong> calcolati dai movimenti</strong>: nella tab Portafoglio non sono più
+              modificabili a mano. Gli altri restano come li hai inseriti.
+              {" "}L'<strong>XIRR</strong> considera solo le posizioni con un registro
+              ({fmt(txCurrentValue)} di valore attuale).
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+
   // ====================== TAB: SETTINGS ======================
   // Fase 10: valori per-utente, salvati nel blob config (auto-save). Zero hardcoded.
   const setSetting = (key, val, liveSetter) => {
@@ -2563,6 +3468,11 @@ const refreshGoldPrices = useCallback(async () => {
             { key: "projReturn",          label: "Rendimento annuo default (%)",  set: setProjR,  step: 0.5, min: 0, max: 30 },
             { key: "projMonthly",         label: "Investimento mensile default (€)", set: setProjM, step: 100, min: 0 },
             { key: "projYears",           label: "Anni proiezione default",       set: setProjY,  step: 1,   min: 1, max: 50 },
+            { key: "inflation",           label: "Inflazione attesa (%)",         set: null,      step: 0.1, min: 0, max: 20 },
+            { key: "riskFree",            label: "Tasso privo di rischio (%)",    set: null,      step: 0.1, min: 0, max: 15 },
+            { key: "rebalanceBand",       label: "Banda ribilanciamento (punti %)", set: null,    step: 0.5, min: 0, max: 25 },
+            { key: "taxRate",             label: "Aliquota capital gain (%)",     set: null,      step: 0.5, min: 0, max: 50 },
+            { key: "taxBollo",            label: "Bollo titoli annuo (%)",        set: null,      step: 0.05, min: 0, max: 2 },
           ].map(({ key, label, set, step, min, max }) => (
             <label key={key} className="field-label">
               {label}
@@ -2597,13 +3507,56 @@ const refreshGoldPrices = useCallback(async () => {
             </label>
           ))}
         </div>
+
+        {/* Fase di prelievo */}
+        <div style={{ marginBottom: "1.5rem" }}>
+          <label className="field-label" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <input type="checkbox" checked={projWithdraw} onChange={(e) => setProjW(e.target.checked)}
+              style={{ width: 18, height: 18, minHeight: 0 }}/>
+            Simula la fase di prelievo (si smette di versare e si inizia a ritirare)
+          </label>
+          {projWithdraw && (
+            <div className="grid-3" style={{ marginTop: 8 }}>
+              <label className="field-label">Inizio prelievi (anni da oggi)
+                <input type="number" value={projWithdrawAfter} min={0} max={projYears} step={1}
+                  onChange={(e) => setProjWA(parseFloat(e.target.value) || 0)} className="field-input"/>
+              </label>
+              <label className="field-label">Prelievo mensile (€)
+                <input type="number" value={projWithdrawMonthly} min={0} step={100}
+                  onChange={(e) => setProjWM(parseFloat(e.target.value) || 0)} className="field-input"/>
+              </label>
+              <label className="field-label">Prelievo annuo
+                <input className="field-input" readOnly value={fmt(projWithdrawMonthly * 12)}
+                  style={{ opacity: 0.6 }}/>
+              </label>
+            </div>
+          )}
+        </div>
+
         <div className="grid-4" style={{ marginBottom: "1.5rem" }}>
           <KpiCard label="Valore iniziale" value={fmt(grandTotal, true)} color="blue"/>
           <KpiCard label={`Proiettato (${projYears}a) — Base`} value={fmt(finalVal, true)} color="green"/>
-          <KpiCard label="Ottimistico (+3%)" value={fmt(projData.at(-1)?.optimistic ?? 0, true)} color="green"/>
+          <KpiCard label="In potere d'acquisto di oggi"
+            value={fmt(projData.at(-1)?.real ?? 0, true)}
+            sub={`inflazione ${settings.inflation ?? 0}%`} color="blue"/>
           <KpiCard label="Guadagno previsto" value={fmt(projGain, true)} sub={`ROI stimato: ${projROI.toFixed(1)}%`}
             color={projGain >= 0 ? "green" : "red"}/>
         </div>
+
+        {projWithdraw && (
+          projDepletion != null ? (
+            <div className="alert alert-amber" style={{ marginBottom: 12 }}>
+              <AlertTriangle size={14}/> Con questi parametri il capitale si esaurisce
+              dopo <strong>{projDepletion} anni</strong>: il prelievo è più alto di quanto
+              il portafoglio riesca a produrre.
+            </div>
+          ) : (
+            <div className="alert alert-green" style={{ marginBottom: 12 }}>
+              <CheckCircle size={14}/> Il capitale regge tutti i {projYears} anni della proiezione
+              con un prelievo di {fmt(projWithdrawMonthly)} al mese.
+            </div>
+          )
+        )}
         <div className="chart-legend">
           <span className="cl-item"><span className="cl-swatch cl-swatch--band" style={{ background: palette[0] }}/>
             Intervallo {Math.max(projReturn - 3, 0)}%–{projReturn + 3}%
@@ -2611,6 +3564,11 @@ const refreshGoldPrices = useCallback(async () => {
           <span className="cl-item"><span className="cl-swatch" style={{ background: palette[0] }}/>
             Scenario base ({projReturn}%)
           </span>
+          {(settings.inflation ?? 0) > 0 && (
+            <span className="cl-item"><span className="cl-swatch" style={{ background: palette[2] }}/>
+              Potere d'acquisto di oggi
+            </span>
+          )}
         </div>
         <div style={{ height: 380 }}>
           <ResponsiveContainer width="100%" height="100%">
@@ -2623,10 +3581,17 @@ const refreshGoldPrices = useCallback(async () => {
                 fill={palette[0]} fillOpacity={0.16} activeDot={false} isAnimationActive={false}/>
               <Line type="monotone" dataKey="base" name="Scenario base" stroke={palette[0]} strokeWidth={2}
                 dot={false} activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--bg-card)" }}/>
+              {(settings.inflation ?? 0) > 0 && (
+                <Line type="monotone" dataKey="real" name="Potere d'acquisto" stroke={palette[2]}
+                  strokeWidth={2} strokeDasharray="5 4" dot={false}/>
+              )}
             </ComposedChart>
           </ResponsiveContainer>
         </div>
-        <p className="hint-text">⚠ Proiezione ipotetica basata su rendimento costante. Non costituisce consulenza finanziaria.</p>
+        <p className="hint-text">
+          ⚠ Proiezione ipotetica a rendimento costante. Non costituisce consulenza finanziaria.
+          {(settings.inflation ?? 0) > 0 && ` La linea tratteggiata è la stessa cifra espressa in euro di oggi, scontata al ${settings.inflation}% annuo: è quella che dice cosa ci si potrà comprare.`}
+        </p>
       </div>
     </div>
   );
@@ -2653,6 +3618,18 @@ const refreshGoldPrices = useCallback(async () => {
                   <input type="number" value={monthBudget} onChange={(e) => setBudget(parseFloat(e.target.value) || 0)}
                     step="100" min="0" className="field-input" style={{ width: 120 }}/>
                 </label>
+                {(settings.rebalanceBand ?? 0) > 0 && (
+                  <span className="muted" style={{ fontSize: 13 }}>
+                    Banda di tolleranza: <strong>{settings.rebalanceBand}</strong> punti — chi è più
+                    vicino di così al target non viene toccato.
+                  </span>
+                )}
+                {!readOnly && (
+                  <button className="btn btn-primary" style={{ marginLeft: "auto" }}
+                    onClick={applyRebalance} disabled={monthBudget <= 0}>
+                    <CheckCircle size={15}/> Segna come eseguito
+                  </button>
+                )}
               </div>
 
               <div className="grid-3" style={{ marginBottom: "1rem" }}>
@@ -2910,6 +3887,8 @@ const refreshGoldPrices = useCallback(async () => {
       <main className="app-main">
         {tab === "overview"    && renderOverview()}
         {tab === "portfolio"   && renderPortfolio()}
+        {tab === "transactions" && !readOnly && renderTransactions()}
+        {tab === "analysis"    && renderAnalysis()}
         {tab === "projection"  && renderProjection()}
         {tab === "rebalancing" && renderRebalancing()}
         {tab === "settings"    && renderSettings()}
@@ -2936,6 +3915,7 @@ const refreshGoldPrices = useCallback(async () => {
           asset={assetModal}
           assetClasses={assetClasses}
           etfTargetOthers={r2(etfTargetSum - (assetModal?.id && !isTotalTargetAsset(assetModal) ? (assetModal.targetWeight || 0) : 0))}
+          fromTx={!!assetModal?.id && transactions.some((t) => t.assetKey === txKey(assetModal))}
           onSave={(a) => {
             saveAsset(a);
 
@@ -2967,6 +3947,21 @@ const refreshGoldPrices = useCallback(async () => {
       )}
       {acModal && (
         <AssetClassModal classes={assetClasses} onSave={setAC} onClose={() => setACModal(false)}/>
+      )}
+      {txModal !== null && (
+        <TxModal tx={txModal?.id ? txModal : null} options={txOptions}
+          onSave={saveTx} onClose={() => setTxModal(null)}/>
+      )}
+      {snapModal !== null && (
+        <SnapshotModal
+          snap={snapModal?.label ? snapModal : null}
+          preset={!snapModal?.label && snapModal?.year ? snapModal : null}
+          nearest={snapModal?.year
+            ? [...snapshots].reverse().find((s) => s.year < snapModal.year
+                || (s.year === snapModal.year && s.month < snapModal.month)) ?? snapshots[0]
+            : snapshots.at(-1)}
+          taken={new Set(snapshots.map((s) => `${s.year}-${s.month}`))}
+          onSave={saveSnapshotManual} onClose={() => setSnapModal(null)}/>
       )}
       {shareModal && <ShareModal onClose={() => setShareModal(false)}/>}
     </div>

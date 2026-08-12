@@ -44,6 +44,29 @@ if (useSupabase) {
   console.log("📁 Mode: legacy file (single-user)");
 }
 
+// ── Health (pubblico, nessun dato utente) ─────────────────────
+// Senza auth di proposito: è il probe del container. Prima puntava su
+// /api/snapshots, che in modo Supabase risponde 401 → istanza unhealthy.
+app.get("/health", (_req, res) =>
+  res.json({ ok: true, mode: useSupabase ? "supabase" : "legacy" }));
+
+// ── Cache prezzi ──────────────────────────────────────────────
+// I due proxy sono pubblici e ogni client li interroga a ogni refresh
+// (N asset ogni 15 min): un TTL breve taglia le chiamate a monte e riduce
+// l'esposizione del proxy aperto.
+// ponytail: Map in memoria, muore col processo e vale per istanza. Con più
+// repliche serve una cache condivisa (Redis) o un TTL sul CDN.
+const PRICE_TTL_MS = 5 * 60_000;
+const priceCache = new Map();
+async function cachedPrice(key, fn) {
+  const hit = priceCache.get(key);
+  if (hit && Date.now() - hit.t < PRICE_TTL_MS) return hit.v;
+  const v = await fn();
+  if (priceCache.size > 500) priceCache.clear(); // le chiavi arrivano da fuori
+  priceCache.set(key, { t: Date.now(), v });
+  return v;
+}
+
 // ── File fallback (usato solo in legacy) ──────────────────────
 const DATA_DIR       = path.join(__dirname, "../data");
 const SNAPSHOTS_FILE = path.join(DATA_DIR, "snapshots.json");
@@ -183,6 +206,16 @@ app.delete("/api/share", requireAuth, async (req, res) => {
 // Vista pubblica: nessuna auth, sola lettura, nessun dato oltre al portafoglio.
 // Il formato del token è validato prima della query, così un token vuoto o
 // malformato non può mai matchare righe con share_token null.
+// Il registro movimenti non esce mai dal link pubblico: dice quando e a quanto
+// si è comprato e venduto, cioè molto più di quanto si intende condividere
+// mostrando il portafoglio. Si toglie qui, non nel frontend, perché il confine
+// è l'API.
+const publicConfig = (cfg) => {
+  if (!cfg || typeof cfg !== "object") return cfg ?? null;
+  const { transactions, ...rest } = cfg;
+  return rest;
+};
+
 app.get("/api/public/:token", async (req, res) => {
   const token = req.params.token;
   const notFound = () => res.status(404).json({ error: "Link non valido o non più attivo" });
@@ -202,7 +235,7 @@ app.get("/api/public/:token", async (req, res) => {
       if (snapErr) throw snapErr;
 
       // user_id resta lato server: la risposta contiene solo i dati del portafoglio.
-      return res.json({ config: row.data ?? null, snapshots: (snaps || []).map(toClientSnap) });
+      return res.json({ config: publicConfig(row.data), snapshots: (snaps || []).map(toClientSnap) });
     }
 
     const share = readShareFile();
@@ -210,7 +243,7 @@ app.get("/api/public/:token", async (req, res) => {
     const config = fs.existsSync(CONFIG_FILE)
       ? JSON.parse(fs.readFileSync(CONFIG_FILE, "utf8"))
       : null;
-    res.json({ config, snapshots: readSnapshotsFile() });
+    res.json({ config: publicConfig(config), snapshots: readSnapshotsFile() });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -223,11 +256,13 @@ app.get("/api/quote", async (req, res) => {
 
   const url = `https://www.justetf.com/api/etfs/${isin}/quote?locale=it&currency=EUR&isin=${isin}`;
   try {
-    const r = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
-    });
-    if (!r.ok) throw new Error(`JustETF API error: ${r.status}`);
-    res.json(await r.json());
+    res.json(await cachedPrice(`quote:${isin}`, async () => {
+      const r = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+      });
+      if (!r.ok) throw new Error(`JustETF API error: ${r.status}`);
+      return r.json();
+    }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -236,23 +271,25 @@ app.get("/api/quote", async (req, res) => {
 // ── Gold price (pubblico) ─────────────────────────────────────
 app.get("/api/gold-price", async (req, res) => {
   try {
-    const r = await fetch("https://api.gold-api.com/price/XAU/EUR", {
-      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
-      agent: goldApiAgent,
-    });
-    if (!r.ok) throw new Error(`gold-api.com error: ${r.status}`);
-    const data = await r.json();
+    res.json(await cachedPrice("gold", async () => {
+      const r = await fetch("https://api.gold-api.com/price/XAU/EUR", {
+        headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
+        agent: goldApiAgent,
+      });
+      if (!r.ok) throw new Error(`gold-api.com error: ${r.status}`);
+      const data = await r.json();
 
-    const spotEurPerTroyOz = data.price;
-    const spotEurPerGram   = spotEurPerTroyOz / 31.1035; // 1 troy oz = 31.1035 g
-    const price18ktPerGram = spotEurPerGram * 0.75;       // 18kt = 75% oro puro
+      const spotEurPerTroyOz = data.price;
+      const spotEurPerGram   = spotEurPerTroyOz / 31.1035; // 1 troy oz = 31.1035 g
+      const price18ktPerGram = spotEurPerGram * 0.75;       // 18kt = 75% oro puro
 
-    res.json({
-      spotEurPerTroyOz: Math.round(spotEurPerTroyOz * 100) / 100,
-      spotEurPerGram:   Math.round(spotEurPerGram   * 100) / 100,
-      price18ktPerGram: Math.round(price18ktPerGram * 100) / 100,
-      updatedAt: data.updatedAt,
-    });
+      return {
+        spotEurPerTroyOz: Math.round(spotEurPerTroyOz * 100) / 100,
+        spotEurPerGram:   Math.round(spotEurPerGram   * 100) / 100,
+        price18ktPerGram: Math.round(price18ktPerGram * 100) / 100,
+        updatedAt: data.updatedAt,
+      };
+    }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -310,16 +347,25 @@ app.post("/api/snapshot", requireAuth, async (req, res) => {
   }
 });
 
-app.delete("/api/snapshot/:label", requireAuth, async (req, res) => {
+// Si cancella per (anno, mese), la chiave unique dello schema. Prima era per
+// label, che unique non è: due snapshot con la stessa etichetta sparivano
+// insieme.
+app.delete("/api/snapshot/:year/:month", requireAuth, async (req, res) => {
   try {
-    const label = decodeURIComponent(req.params.label);
+    const year  = Number(req.params.year);
+    const month = Number(req.params.month);
+    if (!Number.isInteger(year) || !Number.isInteger(month) || month < 1 || month > 12) {
+      return res.status(400).json({ error: "Anno o mese non validi" });
+    }
     if (useSupabase) {
       const { error } = await supabase
-        .from("snapshots").delete().eq("user_id", req.userId).eq("label", label);
+        .from("snapshots").delete()
+        .eq("user_id", req.userId).eq("year", year).eq("month", month);
       if (error) throw error;
       return res.json({ ok: true });
     }
-    writeJsonAtomic(SNAPSHOTS_FILE, readSnapshotsFile().filter((s) => s.label !== label));
+    writeJsonAtomic(SNAPSHOTS_FILE,
+      readSnapshotsFile().filter((s) => !(s.year === year && s.month === month)));
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

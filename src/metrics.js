@@ -1,0 +1,237 @@
+// Metriche di rendimento e rischio — pure, testabili in Jest.
+//
+// Stavano dentro App.js, dove nessun test poteva raggiungerle: sono la parte
+// della dashboard in cui un errore non si vede a occhio, perché il numero
+// sbagliato ha lo stesso aspetto di quello giusto.
+
+import { r2, snapKey } from "./rebalance";
+
+// Sotto queste soglie una metrica non è "meno precisa": è rumore con due
+// decimali. Un rapporto di Sharpe su 5 rendimenti mensili dipende quasi
+// interamente da quale mese è capitato dentro il campione.
+export const MIN_OBS_RATIO = 12;   // Sharpe, Sortino, volatilità
+export const MIN_OBS_TREND = 2;    // CAGR, drawdown
+export const OBS_RELIABLE  = 24;   // sotto: da leggere come indicazione
+
+// Rendimenti time-weighted: sottrae i flussi esterni (versamenti/prelievi) così
+// mettere soldi non si confonde con guadagnare.
+export const calcReturns = (history) => {
+  const r = [];
+  for (let i = 1; i < history.length; i++) {
+    if (history[i - 1].v <= 0) continue;
+    r.push((history[i].v - (history[i].cf || 0) - history[i - 1].v) / history[i - 1].v);
+  }
+  return r;
+};
+
+export const calcCAGR = (history) => {
+  if (history.length < 2) return null;
+  const years = (new Date(history.at(-1).t) - new Date(history[0].t)) / (365.25 * 864e5);
+  if (!(years > 0)) return null;
+  const r = calcReturns(history);
+  if (r.length < MIN_OBS_TREND) return null;
+  const growth = r.reduce((acc, x) => acc * (1 + x), 1);
+  if (growth <= 0) return null;
+  return Math.pow(growth, 1 / years) - 1;
+};
+
+export const calcVolatility = (history) => {
+  const r = calcReturns(history);
+  if (r.length < MIN_OBS_RATIO) return null;
+  const mean = r.reduce((a, b) => a + b, 0) / r.length;
+  const variance = r.reduce((a, b) => a + (b - mean) ** 2, 0) / r.length;
+  return Math.sqrt(variance * 12);
+};
+
+// Drawdown sull'indice dei rendimenti (netti dai versamenti), non sul valore
+// lordo: altrimenti un mese senza versamento sembrerebbe una perdita.
+export const calcMaxDrawdown = (history) => {
+  const r = calcReturns(history);
+  if (r.length < MIN_OBS_TREND) return null;
+  let idx = 1, peak = 1, mdd = 0;
+  for (const x of r) {
+    idx *= 1 + x;
+    if (idx > peak) peak = idx;
+    const dd = (idx - peak) / peak;
+    if (dd < mdd) mdd = dd;
+  }
+  return mdd;
+};
+
+export const calcSharpe = (history, rf = 0.03) => {
+  const cagr = calcCAGR(history);
+  const vol  = calcVolatility(history);
+  if (cagr == null || vol == null || vol === 0) return null;
+  return (cagr - rf) / vol;
+};
+
+export const calcSortino = (history, rf = 0.03) => {
+  const r = calcReturns(history);
+  if (r.length < MIN_OBS_RATIO) return null;
+  const meanAnn = (r.reduce((a, b) => a + b, 0) / r.length) * 12;
+  const neg = r.filter((x) => x < 0);
+  if (!neg.length) return null;
+  const downDev = Math.sqrt((neg.reduce((a, b) => a + b ** 2, 0) / neg.length) * 12);
+  if (downDev === 0) return null;
+  return (meanAnn - rf) / downDev;
+};
+
+// Quanto ci si può fidare, dato il numero di osservazioni disponibili.
+export const riskQuality = (n) =>
+  n < MIN_OBS_RATIO ? "insufficiente" : n < OBS_RELIABLE ? "indicativo" : "solido";
+
+// Serie storica pronta per le metriche: valore mensile + flusso esterno del
+// periodo. Il flusso si ricava dalle variazioni di quantità (chiave = snapKey,
+// mai l'id, che si rigenera cancellando e riaggiungendo un asset).
+export const buildHistory = (snapshots) => {
+  const pts = snapshots.map((s) => ({
+    t: `${s.year}-${String(s.month).padStart(2, "0")}-01`,
+    v: s.totalValue,
+    pos: Object.fromEntries((s.assets || []).map((a) => [snapKey(a), { q: a.quantity || 0, price: a.price || 0 }])),
+  }));
+  for (let i = 0; i < pts.length; i++) {
+    if (i === 0) { pts[i].cf = 0; continue; }
+    const prev = pts[i - 1].pos;
+    let cf = 0;
+    for (const [k, p] of Object.entries(pts[i].pos)) cf += (p.q - (prev[k]?.q || 0)) * p.price;
+    pts[i].cf = cf;
+  }
+  return pts;
+};
+
+// Curva di drawdown: quanto si è sotto il massimo raggiunto, mese per mese.
+// Il numero singolo dice quanto è stata profonda la buca; la curva dice anche
+// quanto è durata, che è ciò che si sopporta davvero.
+export const drawdownSeries = (snapshots) => {
+  const hist = buildHistory(snapshots);
+  const r = calcReturns(hist);
+  if (!r.length) return [];
+  const out = [];
+  let idx = 1, peak = 1;
+  for (let i = 0; i < r.length; i++) {
+    idx *= 1 + r[i];
+    if (idx > peak) peak = idx;
+    out.push({ label: snapshots[i + 1].label, dd: r2(((idx - peak) / peak) * 100) });
+  }
+  return out;
+};
+
+// Composizione percentuale nel tempo: la deriva strutturale che una torta
+// istantanea non può mostrare.
+export const allocationOverTime = (snapshots) => snapshots.map((s) => {
+  const total = (s.assets || []).reduce((acc, a) => acc + (a.value || 0), 0);
+  const row = { label: s.label };
+  (s.assets || []).forEach((a) => {
+    row[snapKey(a)] = total > 0 ? r2(((a.value || 0) / total) * 100) : 0;
+  });
+  return row;
+});
+
+// Quanti euro ha prodotto ogni asset, al netto di ciò che ci è stato versato
+// dentro. Risponde a "chi ha fatto il risultato", che non è "chi ha la
+// performance percentuale più alta": conta anche quanto pesa.
+export const contributionByAsset = (snapshots) => {
+  if (snapshots.length < 2) return [];
+  const byKey = {};
+  for (let i = 1; i < snapshots.length; i++) {
+    const prev = {}, prevQ = {};
+    (snapshots[i - 1].assets || []).forEach((a) => {
+      prev[snapKey(a)]  = a.value || 0;
+      prevQ[snapKey(a)] = a.quantity || 0;
+    });
+    (snapshots[i].assets || []).forEach((a) => {
+      const k = snapKey(a);
+      const contrib = ((a.quantity || 0) - (prevQ[k] || 0)) * (a.price || 0);
+      const market  = (a.value || 0) - (prev[k] || 0) - contrib;
+      byKey[k] = (byKey[k] || 0) + market;
+    });
+  }
+  return Object.entries(byKey)
+    .map(([key, gain]) => ({ key, gain: r2(gain) }))
+    .sort((a, b) => b.gain - a.gain);
+};
+
+// Griglia anno × mese dei rendimenti netti dai versamenti.
+export const monthlyReturnsGrid = (snapshots) => {
+  const hist = calcReturns(buildHistory(snapshots));
+  const rows = {};
+  hist.forEach((r, i) => {
+    const s = snapshots[i + 1];
+    (rows[s.year] ??= { year: s.year, months: {} }).months[s.month] = r2(r * 100);
+  });
+  return Object.values(rows).sort((a, b) => a.year - b.year);
+};
+
+// Proiezione a scenari. Tre novità rispetto alla semplice capitalizzazione:
+//  - `inflation`: la stessa curva in potere d'acquisto di oggi. Un capitale che
+//    raddoppia in vent'anni al 2% di inflazione compra il 35% in più, non il
+//    doppio, e questa è l'unica cifra che dice qualcosa sul tenore di vita.
+//  - `withdrawAfter`/`withdrawMonthly`: la fase di prelievo, cioè il motivo per
+//    cui si accumula. Senza, la proiezione risponde a una domanda che nessuno
+//    si pone (quanto avrò se non lo uso mai).
+//  - la banda pessimistico/ottimistico resta ±3 punti di rendimento.
+export const projectionScenarios = ({
+  start, monthly, baseReturn, years,
+  inflation = 0, withdrawAfter = null, withdrawMonthly = 0,
+}) => {
+  const rates = {
+    base: baseReturn / 100 / 12,
+    pessimistic: Math.max(baseReturn - 3, 0) / 100 / 12,
+    optimistic: (baseReturn + 3) / 100 / 12,
+  };
+  const months = Math.max(0, Math.round(years * 12));
+  const infM = inflation / 100 / 12;
+  const drawFrom = withdrawAfter == null ? null : Math.round(withdrawAfter * 12);
+
+  const v = { base: start, pessimistic: start, optimistic: start };
+  const data = [];
+  for (let i = 0; i <= months; i++) {
+    if (i % 12 === 0) {
+      data.push({
+        year: i / 12,
+        base: r2(v.base), pessimistic: r2(v.pessimistic), optimistic: r2(v.optimistic),
+        // Valore reale: quanto varrebbe quella cifra in euro di oggi.
+        real: r2(v.base / Math.pow(1 + infM, i)),
+      });
+    }
+    if (i >= months) break;
+    const drawing = drawFrom != null && i >= drawFrom;
+    const flow = drawing ? -withdrawMonthly : monthly;
+    for (const k of Object.keys(v)) {
+      v[k] = v[k] * (1 + rates[k]) + flow;
+      if (v[k] < 0) v[k] = 0;              // il capitale si esaurisce, non va in debito
+    }
+  }
+  return data;
+};
+
+// Anno in cui il capitale si esaurisce nella fase di prelievo, se accade.
+export const depletionYear = (data) => {
+  const hit = data.find((d) => d.base <= 0);
+  return hit ? hit.year : null;
+};
+
+// Confronto con un riferimento: patrimonio e benchmark riportati entrambi a 100
+// sul primo snapshot. Il patrimonio usa l'indice dei rendimenti (netto dai
+// versamenti), altrimenti si confronterebbe la capacità di risparmio con
+// l'andamento di un mercato.
+export const benchmarkSeries = (snapshots, benchmarkKey) => {
+  if (snapshots.length < 2 || !benchmarkKey) return [];
+  const r = calcReturns(buildHistory(snapshots));
+  const priceAt = (s) => (s.assets || []).find((a) => snapKey(a) === benchmarkKey)?.price ?? null;
+  const base = priceAt(snapshots[0]);
+  if (!base) return [];
+
+  const out = [{ label: snapshots[0].label, portfolio: 100, benchmark: 100 }];
+  let idx = 1;
+  for (let i = 0; i < r.length; i++) {
+    idx *= 1 + r[i];
+    const p = priceAt(snapshots[i + 1]);
+    out.push({
+      label: snapshots[i + 1].label,
+      portfolio: r2(idx * 100),
+      benchmark: p ? r2((p / base) * 100) : null,
+    });
+  }
+  return out;
+};

@@ -223,3 +223,46 @@ test("abbonamento omesso: retrocompatibile col calcolo precedente", () => {
   expect(p.pnlOverall).toBe(p.pnlTot);
   expect(p.roiOverallPct).toBeCloseTo(p.roiPct, 6);
 });
+
+// ====================== bande di tolleranza ======================
+test("con la banda attiva un asset quasi a target non riceve nulla", () => {
+  // "a" è sotto di 1 punto, "b" di 10: con banda 5 tutto il budget va a "b".
+  const assets = [
+    { name: "a", targetWeight: 50, lastPrice: 100, quantity: 49 },   // 4.900 → 49%
+    { name: "b", targetWeight: 50, lastPrice: 100, quantity: 40 },   // 4.000 → 40%
+  ];
+  const { actions } = calcRebalancing(assets, 8900, 1000, 5);
+  expect(actions[0].monthlyBuy).toBe(0);
+  expect(actions[1].monthlyBuy).toBe(1000);
+  expect(actions[0].inBand).toBe(true);
+  expect(actions[1].inBand).toBe(false);
+});
+
+test("se nessuno esce dalla banda il budget si distribuisce ai pesi target, non resta fermo", () => {
+  const assets = [
+    { name: "a", targetWeight: 60, lastPrice: 100, quantity: 60 },
+    { name: "b", targetWeight: 40, lastPrice: 100, quantity: 40 },
+  ];
+  const { actions } = calcRebalancing(assets, 10000, 1000, 5);
+  expect(actions[0].monthlyBuy).toBe(600);
+  expect(actions[1].monthlyBuy).toBe(400);
+});
+
+test("banda a zero: comportamento identico a prima", () => {
+  const assets = [
+    { name: "a", targetWeight: 50, lastPrice: 100, quantity: 49 },
+    { name: "b", targetWeight: 50, lastPrice: 100, quantity: 40 },
+  ];
+  expect(calcRebalancing(assets, 8900, 1000, 0).actions.map((a) => a.monthlyBuy))
+    .toEqual(calcRebalancing(assets, 8900, 1000).actions.map((a) => a.monthlyBuy));
+});
+
+test("la banda vale anche al livello 1 (oro, Bitcoin)", () => {
+  const items = [{ id: "g", name: "Oro", targetPct: 10, currentVal: 950, price: 50 }]; // 9,5% su 10.000
+  const etf = [{ name: "w", targetWeight: 100, lastPrice: 100, quantity: 90 }];
+  const senza = calcRebalancingTwoLevel(etf, items, 10000, 9000, 1000, 0);
+  const con   = calcRebalancingTwoLevel(etf, items, 10000, 9000, 1000, 5);
+  expect(senza.itemBuys[0].buy).toBeGreaterThan(0);
+  expect(con.itemBuys[0].buy).toBe(0);
+  expect(con.etfBudget).toBe(1000);
+});

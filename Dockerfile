@@ -44,8 +44,9 @@ RUN mkdir -p /app/data
 # Expose port
 EXPOSE 10000
 
-# Health check
+# Health check — /health è pubblico: /api/snapshots in modo Supabase
+# risponde 401 e marcherebbe il container unhealthy.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD wget -qO- http://localhost:10000/api/snapshots || exit 1
+  CMD wget -qO- http://localhost:10000/health || exit 1
 
 CMD ["node", "server/server.js"]

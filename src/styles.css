@@ -617,3 +617,9 @@ html, body {
   .kpi-card { padding: 12px 14px; }
   .btn { font-size: 13px; padding: 8px 12px; }
 }
+
+.alert-green { background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.25); color: #6ee7b7; }
+
+/* Heatmap rendimenti: celle strette, colore di sfondo dato inline dal valore. */
+.data-table.heatmap th, .data-table.heatmap td { padding: 6px 8px; font-size: 12px; }
+.data-table.heatmap tbody td { text-align: right; }

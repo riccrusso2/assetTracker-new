@@ -34,7 +34,9 @@ const check = (name, fn) => {
 function makeStub() {
   const db = {
     portfolios: [
-      { user_id: USER_A, data: { version: 3, totalCash: 1000, assets: [{ id: "x", name: "ETF A" }] },
+      { user_id: USER_A, data: { version: 4, totalCash: 1000, assets: [{ id: "x", name: "ETF A" }],
+          transactions: [{ id: "t1", date: "2026-01-10", assetKey: "etf-a", type: "buy",
+                           quantity: 10, price: 100, fee: 5 }] },
         share_token: null, share_enabled: false },
       { user_id: USER_B, data: { version: 3, totalCash: 7, assets: [{ id: "y", name: "ETF B" }] },
         share_token: null, share_enabled: false },
@@ -187,6 +189,18 @@ async function runSupabase(port) {
     assert.ok(!raw.includes("user_id"), "chiave user_id presente nella risposta");
   });
 
+  check("il registro movimenti non esce dal link pubblico", () => {
+    assert.ok(!("transactions" in pub.body.config), "transactions presente nella risposta");
+    assert.ok(!JSON.stringify(pub.body).includes("assetKey"), "movimenti trapelati");
+    // …ma il resto del portafoglio deve esserci ancora.
+    assert.strictEqual(pub.body.config.assets.length, 1);
+  });
+
+  check("togliere i movimenti dalla risposta non li cancella dal database", () => {
+    const row = stub.__db.portfolios.find((r) => r.user_id === USER_A);
+    assert.strictEqual(row.data.transactions.length, 1);
+  });
+
   check("gli snapshot condivisi sono solo quelli del proprietario", () => {
     assert.deepStrictEqual(pub.body.snapshots.map((s) => s.totalValue), [1000]);
   });
@@ -195,7 +209,7 @@ async function runSupabase(port) {
   const writes = [
     ["POST   /api/config",        () => req(port, "/api/config", json(null, { assets: [] }))],
     ["POST   /api/snapshot",      () => req(port, "/api/snapshot", json(null, { label: "X", assets: [], year: 2026, month: 2 }))],
-    ["DELETE /api/snapshot/:l",   () => req(port, "/api/snapshot/Gen%202026", { method: "DELETE" })],
+    ["DELETE /api/snapshot/:y/:m", () => req(port, "/api/snapshot/2026/1", { method: "DELETE" })],
     ["DELETE /api/snapshots/all", () => req(port, "/api/snapshots/all", { method: "DELETE" })],
     ["POST   /api/share",         () => req(port, "/api/share", { method: "POST" })],
     ["DELETE /api/share",         () => req(port, "/api/share", { method: "DELETE" })],

@@ -1,0 +1,66 @@
+[
+  {
+    "label": "Giu 2026",
+    "month": 6,
+    "year": 2026,
+    "totalValue": 51675.83,
+    "assets": [
+      {
+        "id": "ftseallworld",
+        "name": "FTSE All-World USD",
+        "price": 159.23,
+        "quantity": 94.164474,
+        "value": 14993.81
+      },
+      {
+        "id": "swda",
+        "name": "iShares Core MSCI World (Acc)",
+        "price": 120.8,
+        "quantity": 32,
+        "value": 3865.6
+      },
+      {
+        "id": "msciemimi",
+        "name": "iShares MSCI EM IMI",
+        "price": 46.08,
+        "quantity": 44,
+        "value": 2027.52
+      },
+      {
+        "id": "worldquality",
+        "name": "iShares MSCI World Quality Factor (Acc)",
+        "price": 73.79,
+        "quantity": 31,
+        "value": 2287.49
+      },
+      {
+        "id": "worldmomentum",
+        "name": "iShares MSCI World Momentum Factor (Acc)",
+        "price": 98.41,
+        "quantity": 24,
+        "value": 2361.84
+      },
+      {
+        "id": "worldvalue",
+        "name": "iShares MSCI World Value Factor (Acc)",
+        "price": 67.17,
+        "quantity": 36,
+        "value": 2418.12
+      },
+      {
+        "id": "bitcoin",
+        "name": "Bitcoin ETP",
+        "price": 5.31,
+        "quantity": 212,
+        "value": 1125.72
+      },
+      {
+        "id": "gold-etf",
+        "name": "Physical Gold USD (Acc)",
+        "price": 71.82,
+        "quantity": 33.385282,
+        "value": 2397.73
+      }
+    ]
+  }
+]
