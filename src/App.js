@@ -489,22 +489,23 @@ const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, onSave, onClose 
               {assetClasses.map((c) => <option key={c}>{c}</option>)}
             </select>
           </label>
-          <label className="field-label" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <input type="checkbox" style={{ width: "auto" }}
-              checked={onTotal}
-              onChange={(e) => set("targetOnTotal", e.target.checked)}/>
-            Target in % del patrimonio totale (come l'oro)
+          <label className="field-label">
+            Il target si riferisce a
+            <select value={onTotal ? "total" : "etf"} className="field-input"
+              onChange={(e) => set("targetOnTotal", e.target.value === "total")}>
+              <option value="etf">Sotto-portafoglio ETF &amp; Asset quotati</option>
+              <option value="total">Patrimonio totale (come l'oro)</option>
+            </select>
           </label>
-          {!onTotal && (
-            <p className="hint-text" style={{ marginTop: 0, color: targetOver ? "var(--red)" : undefined }}>
-              {targetOver
+          <p className="hint-text" style={{ marginTop: 0, color: targetOver ? "var(--red)" : undefined }}>
+            {onTotal
+              ? "Il peso target è calcolato sull'intero patrimonio (liquidità, ETF, startup, oro). L'asset viene mostrato nella sezione Oro & Bitcoin."
+              : targetOver
                 ? `⚠ Target massimo ${targetLeft}%: gli altri asset ne occupano già ${etfTargetOthers}% e la somma non può superare 100%.`
-                : `Target disponibile: ${targetLeft}% (altri asset: ${etfTargetOthers}%).`}
-            </p>
-          )}
+                : `Il peso target è calcolato sul solo sotto-portafoglio ETF. Target disponibile: ${targetLeft}% (altri asset: ${etfTargetOthers}%).`}
+          </p>
           <p className="hint-text" style={{ marginTop: 0 }}>
             Se inserisci un ISIN valido, il prezzo sarà aggiornato automaticamente via JustETF.
-            {" "}Con la spunta attiva, il peso target è calcolato sull'intero patrimonio (liquidità, ETF, startup, oro) invece che sul solo sotto-portafoglio ETF — utile per Bitcoin, che finisce nella sezione <strong>Oro &amp; Bitcoin</strong>.
           </p>
         </div>
         <div className="modal-footer">
