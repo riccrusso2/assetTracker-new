@@ -85,20 +85,89 @@ export const calcSortino = (history, rf = 0.03) => {
 export const riskQuality = (n) =>
   n < MIN_OBS_RATIO ? "insufficiente" : n < OBS_RELIABLE ? "indicativo" : "solido";
 
+// ====================== PERIMETRO DELLO SNAPSHOT ======================
+// `totalValue` è il patrimonio intero (quotate + liquidità + oro fisico +
+// startup), ma `assets[]` conteneva solo le posizioni con un prezzo. Con i due
+// perimetri disallineati il flusso esterno risultava sbagliato nei due versi:
+// comprare un ETF con la liquidità già dentro il totale sembrava una perdita,
+// e un versamento in liquidità sembrava un guadagno.
+//
+// Le parti non quotate diventano righe sintetiche dello snapshot: quantità =
+// valore e prezzo = 1 per liquidità e startup (non hanno una quotazione),
+// grammi × €/g per l'oro fisico (ce l'ha, e il suo movimento è rendimento).
+export const SYNTHETIC_CASH     = "__cash__";
+export const SYNTHETIC_PHYSGOLD = "__physgold__";
+export const SYNTHETIC_STARTUPS = "__startups__";
+// Chiave di ripiego per gli snapshot salvati prima delle righe sintetiche.
+export const SYNTHETIC_RESIDUAL = "__nonquotato__";
+
+export const SYNTHETIC_LABELS = {
+  [SYNTHETIC_CASH]:     "Liquidità",
+  [SYNTHETIC_PHYSGOLD]: "Oro fisico",
+  [SYNTHETIC_STARTUPS]: "Startup",
+  [SYNTHETIC_RESIDUAL]: "Non quotato",
+};
+
+// Una riga sintetica gira in due forme: l'oggetto (che ha `id`) e la chiave già
+// risolta da snapKey (che è lo slug del nome). Servono entrambe, altrimenti il
+// filtro funziona sugli snapshot e non sui grafici, che ragionano per chiave.
+const SYNTHETIC_KEYS = new Set(
+  Object.entries(SYNTHETIC_LABELS).flatMap(([id, name]) => [id, snapKey({ id, name })]));
+
+export const isSynthetic = (a) =>
+  SYNTHETIC_KEYS.has(typeof a === "string" ? a : (a?.id ?? snapKey(a)));
+
+// Etichetta leggibile a partire dalla chiave risolta, per i grafici.
+export const syntheticLabel = (key) =>
+  Object.entries(SYNTHETIC_LABELS)
+    .find(([id, name]) => key === id || key === snapKey({ id, name }))?.[1] ?? null;
+
+// Righe non quotate di uno snapshot. Le voci a zero restano fuori: una riga a
+// quantità 0 che compare e scompare produrrebbe flussi nulli ma rumorosi.
+export const syntheticRows = ({ totalCash = 0, physGoldGrams = 0,
+                                physGoldPricePerGram = 0, startupsValue = 0 } = {}) => {
+  const row = (id, price, quantity) => ({
+    id, name: SYNTHETIC_LABELS[id], price, quantity,
+    value: r2(price * quantity), synthetic: true,
+  });
+  const rows = [];
+  if (totalCash) rows.push(row(SYNTHETIC_CASH, 1, r2(totalCash)));
+  if (physGoldGrams && physGoldPricePerGram) {
+    rows.push(row(SYNTHETIC_PHYSGOLD, physGoldPricePerGram, physGoldGrams));
+  }
+  if (startupsValue) rows.push(row(SYNTHETIC_STARTUPS, 1, r2(startupsValue)));
+  return rows;
+};
+
 // Serie storica pronta per le metriche: valore mensile + flusso esterno del
 // periodo. Il flusso si ricava dalle variazioni di quantità (chiave = snapKey,
 // mai l'id, che si rigenera cancellando e riaggiungendo un asset).
 export const buildHistory = (snapshots) => {
-  const pts = snapshots.map((s) => ({
-    t: `${s.year}-${String(s.month).padStart(2, "0")}-01`,
-    v: s.totalValue,
-    pos: Object.fromEntries((s.assets || []).map((a) => [snapKey(a), { q: a.quantity || 0, price: a.price || 0 }])),
-  }));
+  const pts = snapshots.map((s) => {
+    const rows = s.assets || [];
+    const pos = Object.fromEntries(
+      rows.map((a) => [snapKey(a), { q: a.quantity || 0, price: a.price || 0 }]));
+    // Quello che il totale contiene ma nessuna riga dichiara. Sugli snapshot
+    // vecchi è l'intero blocco non quotato; su quelli nuovi è zero. Definirlo
+    // come "tutto ciò che avanza" fa sì che il mese di transizione fra i due
+    // formati non produca un flusso fantasma: le righe sintetiche che entrano
+    // sono esattamente il residuo che esce.
+    const residual = r2((s.totalValue || 0) - rows.reduce((acc, a) => acc + (a.value || 0), 0));
+    if (Math.abs(residual) > 0.005) pos[SYNTHETIC_RESIDUAL] = { q: residual, price: 1 };
+    return { t: `${s.year}-${String(s.month).padStart(2, "0")}-01`, v: s.totalValue, pos };
+  });
   for (let i = 0; i < pts.length; i++) {
     if (i === 0) { pts[i].cf = 0; continue; }
-    const prev = pts[i - 1].pos;
+    const prev = pts[i - 1].pos, cur = pts[i].pos;
     let cf = 0;
-    for (const [k, p] of Object.entries(pts[i].pos)) cf += (p.q - (prev[k]?.q || 0)) * p.price;
+    // Unione delle chiavi, non le sole correnti: una posizione liquidata del
+    // tutto sparisce da `assets[]`, e contando solo le chiavi presenti oggi la
+    // sua uscita verrebbe letta come perdita di mercato invece che come
+    // prelievo. Chi esce si valuta all'ultimo prezzo noto.
+    for (const k of new Set([...Object.keys(prev), ...Object.keys(cur)])) {
+      const now = cur[k], before = prev[k];
+      cf += ((now?.q || 0) - (before?.q || 0)) * (now?.price ?? before?.price ?? 0);
+    }
     pts[i].cf = cf;
   }
   return pts;
@@ -122,12 +191,18 @@ export const drawdownSeries = (snapshots) => {
 
 // Composizione percentuale nel tempo: la deriva strutturale che una torta
 // istantanea non può mostrare.
+// Il denominatore è `totalValue`, non la somma delle righe: sugli snapshot
+// salvati prima delle righe sintetiche le due cose differiscono del 40%, e
+// normalizzare sulle sole righe farebbe risultare il quotato al 100% fino al
+// mese della transizione, con un salto nella serie che non è mai avvenuto.
 export const allocationOverTime = (snapshots) => snapshots.map((s) => {
-  const total = (s.assets || []).reduce((acc, a) => acc + (a.value || 0), 0);
+  const rows = s.assets || [];
+  const total = s.totalValue || rows.reduce((acc, a) => acc + (a.value || 0), 0);
   const row = { label: s.label };
-  (s.assets || []).forEach((a) => {
-    row[snapKey(a)] = total > 0 ? r2(((a.value || 0) / total) * 100) : 0;
-  });
+  const pct = (v) => (total > 0 ? r2((v / total) * 100) : 0);
+  rows.forEach((a) => { row[snapKey(a)] = pct(a.value || 0); });
+  const residual = r2(total - rows.reduce((acc, a) => acc + (a.value || 0), 0));
+  if (residual > 0.005) row[SYNTHETIC_RESIDUAL] = pct(residual);
   return row;
 });
 

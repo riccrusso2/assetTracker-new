@@ -121,6 +121,37 @@ export const calcRebalancingTwoLevel = (etfAssets, items, grandTotal, etfTotalVa
   return { itemBuys, etfBudget, etfTotalVal, etfRebalance };
 };
 
+// ====================== DERIVA DAI TARGET ======================
+// Scostamento in punti percentuali sotto il quale non si segnala nulla, quando
+// l'utente non ha dichiarato una banda propria.
+export const DRIFT_ALERT_PP = 5;
+
+// `positions`: [{ name, actualPct, targetPct }] — i pesi arrivano già calcolati
+// sulla base giusta (sotto-portafoglio ETF o patrimonio totale, a seconda del
+// tipo di target), perché è chi chiama a sapere quale denominatore usare.
+//
+// Si riporta il **massimo** scostamento, non la somma: sommando i valori
+// assoluti la misura cresce col numero di posizioni, e un portafoglio a target
+// ma diviso in dieci righe risulterebbe più "derivato" di uno sbilanciato in
+// due. `sum` resta disponibile perché è il turnover necessario a rimettere
+// tutto in bolla, che è un'altra domanda legittima.
+export const calcDrift = (positions = []) => {
+  const rows = positions
+    .filter((p) => p && Number.isFinite(p.actualPct) && Number.isFinite(p.targetPct))
+    .map((p) => ({ ...p, delta: r2(p.actualPct - p.targetPct) }));
+  if (!rows.length) return { max: 0, sum: 0, worst: null };
+  const worst = rows.reduce((a, b) => (Math.abs(b.delta) > Math.abs(a.delta) ? b : a));
+  return {
+    max:  r2(Math.abs(worst.delta)),
+    sum:  r2(rows.reduce((acc, p) => acc + Math.abs(p.delta), 0)),
+    worst,
+  };
+};
+
+// Soglia effettiva: se l'utente ha dichiarato una banda di tolleranza è quella
+// il criterio, altrimenti il default.
+export const driftThreshold = (band) => (band > 0 ? band : DRIFT_ALERT_PP);
+
 // Attribuzione crescita mese su mese (solo asset quotati negli snapshot):
 // versamenti ≈ Σ Δquantità × prezzo del mese; mercato = Δvalore − versamenti.
 // ponytail: approssima gli acquisti al prezzo di fine mese — per precisione

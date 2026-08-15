@@ -1,6 +1,7 @@
 import {
   r2, isTotalTargetAsset, calcRebalancing, calcRebalancingTwoLevel,
   calcGrowthAttribution, calcStartupMetrics, calcStartupPortfolio,
+  calcDrift, driftThreshold, DRIFT_ALERT_PP,
 } from "./rebalance";
 
 test("Bitcoin (Crypto) e ETF oro hanno per default il target sul patrimonio totale", () => {
@@ -265,4 +266,61 @@ test("la banda vale anche al livello 1 (oro, Bitcoin)", () => {
   expect(senza.itemBuys[0].buy).toBeGreaterThan(0);
   expect(con.itemBuys[0].buy).toBe(0);
   expect(con.etfBudget).toBe(1000);
+});
+
+// ====================== deriva dai target ======================
+
+describe("calcDrift", () => {
+  const p = (name, actualPct, targetPct) => ({ name, actualPct, targetPct });
+
+  // Regressione: la deriva era la SOMMA degli scostamenti assoluti, quindi
+  // cresceva col numero di posizioni. Sul portafoglio reale (6 ETF, scostamento
+  // massimo 2,6 punti) la somma valeva 5,8 e superava la soglia fissa di 5:
+  // l'allarme era permanentemente acceso su un portafoglio in ordine.
+  test("riporta il massimo scostamento, non la somma", () => {
+    const d = calcDrift([
+      p("A", 53.6, 51), p("B", 13.8, 14), p("C", 7.3, 9),
+      p("D", 8.2, 8),   p("E", 8.6, 8),   p("F", 8.5, 8),
+    ]);
+    expect(d.max).toBe(2.6);
+    expect(d.sum).toBe(5.8);
+    expect(d.worst.name).toBe("A");
+  });
+
+  // Il nocciolo della regressione: aggiungere righe che oscillano attorno al
+  // proprio target lascia il portafoglio altrettanto in ordine, ma gonfia la
+  // somma degli scostamenti assoluti. Con la soglia applicata alla somma,
+  // diversificare faceva scattare l'allarme.
+  test("posizioni piccole in bolla non peggiorano la deriva", () => {
+    const base = [p("Grande", 52, 50), p("Media", 30, 30), p("Piccola", 18, 20)];
+    const piuRighe = [
+      ...base,
+      p("N1", 5.5, 5), p("N2", 4.5, 5), p("N3", 5.4, 5), p("N4", 4.6, 5),
+    ];
+    expect(calcDrift(piuRighe).max).toBe(calcDrift(base).max);      // 2 punti in entrambi
+    expect(calcDrift(piuRighe).sum).toBeGreaterThan(calcDrift(base).sum);
+    // Con la vecchia misura (somma) e la soglia di 5 il secondo portafoglio
+    // sarebbe risultato in allarme e il primo no, a parità di ordine.
+    expect(calcDrift(base).sum).toBeLessThan(DRIFT_ALERT_PP);
+    expect(calcDrift(piuRighe).sum).toBeGreaterThan(DRIFT_ALERT_PP);
+    expect(calcDrift(piuRighe).max).toBeLessThan(DRIFT_ALERT_PP);
+  });
+
+  test("il peggiore è il più lontano in valore assoluto, anche se sottopeso", () => {
+    const d = calcDrift([p("sopra", 12, 10), p("sotto", 1, 9)]);
+    expect(d.worst.name).toBe("sotto");
+    expect(d.max).toBe(8);
+    expect(d.worst.delta).toBe(-8);
+  });
+
+  test("nessuna posizione valida: deriva zero e nessun peggiore", () => {
+    expect(calcDrift([])).toEqual({ max: 0, sum: 0, worst: null });
+    expect(calcDrift([{ name: "x" }, null])).toEqual({ max: 0, sum: 0, worst: null });
+  });
+
+  test("la soglia è la banda dichiarata dall'utente, altrimenti il default", () => {
+    expect(driftThreshold(0)).toBe(DRIFT_ALERT_PP);
+    expect(driftThreshold(undefined)).toBe(DRIFT_ALERT_PP);
+    expect(driftThreshold(2)).toBe(2);
+  });
 });

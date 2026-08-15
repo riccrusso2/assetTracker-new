@@ -18,7 +18,7 @@ import {
 import "./styles.css";
 import {
   r2, snapKey, isTotalTargetAsset, calcRebalancingTwoLevel, calcGrowthAttribution,
-  suStatus, calcStartupPortfolio,
+  suStatus, calcStartupPortfolio, calcDrift, driftThreshold,
 } from "./rebalance";
 import {
   TX_TYPES, TX_LABELS, txKey, txCashFlow, holdingFor,
@@ -28,7 +28,8 @@ import {
   calcCAGR, calcVolatility, calcMaxDrawdown, calcSharpe, calcSortino, calcReturns,
   riskQuality, buildHistory, drawdownSeries, allocationOverTime,
   contributionByAsset, monthlyReturnsGrid, benchmarkSeries, OBS_RELIABLE,
-  projectionScenarios, depletionYear,
+  projectionScenarios, depletionYear, syntheticRows, isSynthetic, syntheticLabel,
+  SYNTHETIC_RESIDUAL,
 } from "./metrics";
 import { taxReport, bolloTitoli, latentTax, DEFAULT_TAX } from "./tax";
 import { apiFetch } from "./api";
@@ -135,26 +136,43 @@ const ls = {
 };
 
 // ====================== SNAPSHOT HELPERS ======================
+// Indice base 100 dei soli prezzi di mercato. Le righe sintetiche restano
+// fuori: liquidità e startup hanno prezzo 1 per costruzione (una retta a 100),
+// e l'oro fisico ripeterebbe la curva dell'ETF oro già in grafico.
+const quotedRows = (snap) => (snap.assets || []).filter((a) => !isSynthetic(a));
+
 const buildChartData = (snapshots) => {
-  if (!snapshots.length) return { data: [], assetIds: [] };
+  if (!snapshots.length) return { data: [], assetIds: [], allIds: [] };
   const base = snapshots[0];
   const baseTotal = base.totalValue || 1;
   const baseByAssetId = {};
-  (base.assets || []).forEach((a) => { baseByAssetId[snapKey(a)] = a.price || 1; });
-  const assetIdSet = new Set();
-  snapshots.forEach((s) => (s.assets || []).forEach((a) => assetIdSet.add(snapKey(a))));
-  const assetIds = [...assetIdSet];
+  quotedRows(base).forEach((a) => { baseByAssetId[snapKey(a)] = a.price || 1; });
+  const assetIdSet = new Set(), allIdSet = new Set();
+  snapshots.forEach((s) => {
+    const rows = s.assets || [];
+    rows.forEach((a) => {
+      allIdSet.add(snapKey(a));
+      if (!isSynthetic(a)) assetIdSet.add(snapKey(a));
+    });
+    // Snapshot pre-righe-sintetiche: la parte non quotata esiste solo come
+    // differenza rispetto al totale (vedi allocationOverTime).
+    const residual = (s.totalValue || 0) - rows.reduce((acc, a) => acc + (a.value || 0), 0);
+    if (residual > 0.005) allIdSet.add(SYNTHETIC_RESIDUAL);
+  });
+  // `assetIds`: solo prezzi di mercato (grafico base 100).
+  // `allIds`: tutto il patrimonio (composizione nel tempo, contributo).
+  const assetIds = [...assetIdSet], allIds = [...allIdSet];
   const data = snapshots.map((snap) => {
     const point = { label: snap.label };
     point["__total__"] = r2(((snap.totalValue || 0) / baseTotal) * 100);
-    (snap.assets || []).forEach((a) => {
+    quotedRows(snap).forEach((a) => {
       const k = snapKey(a);
       const b = baseByAssetId[k] || a.price || 1;
       point[k] = r2(((a.price || 0) / b) * 100);
     });
     return point;
   });
-  return { data, assetIds };
+  return { data, assetIds, allIds };
 };
 
 // ====================== CALCULATIONS ======================
@@ -1445,20 +1463,34 @@ const refreshGoldPrices = useCallback(async () => {
   //   target è ETF-relative, mai l'oro fisico)
   // - Oro / Bitcoin a target sul patrimonio: peso effettivo vs grandTotal
   const drift = useMemo(() => {
-    const etfDrift = etfPortfolioAssets.reduce((acc, a) => {
-      const v = (a.lastPrice || 0) * (a.quantity || 0);
-      const actual = etfSubTotal > 0 ? (v / etfSubTotal) * 100 : 0;
-      return acc + Math.abs(actual - (a.targetWeight || 0));
-    }, 0);
-    const goldActual = grandTotal > 0 ? ((goldEtfValue + physGoldValue) / grandTotal) * 100 : 0;
-    const goldDrift  = goldOnTotal && goldEtf.identifier ? Math.abs(goldActual - (goldEtf.targetWeight || 0)) : 0;
-    const ttDrift = totalTargetAssets.reduce((acc, a) => {
-      const v = (a.lastPrice || 0) * (a.quantity || 0);
-      const actual = grandTotal > 0 ? (v / grandTotal) * 100 : 0;
-      return acc + Math.abs(actual - (a.targetWeight || 0));
-    }, 0);
-    return etfDrift + goldDrift + ttDrift;
+    const pct = (v, base) => (base > 0 ? (v / base) * 100 : 0);
+    const positions = [
+      // Target sul sotto-portafoglio ETF.
+      ...etfPortfolioAssets.map((a) => ({
+        name: a.name,
+        actualPct: pct((a.lastPrice || 0) * (a.quantity || 0), etfSubTotal),
+        targetPct: a.targetWeight || 0,
+      })),
+      // Target sul patrimonio totale (Bitcoin, …).
+      ...totalTargetAssets.map((a) => ({
+        name: a.name,
+        actualPct: pct((a.lastPrice || 0) * (a.quantity || 0), grandTotal),
+        targetPct: a.targetWeight || 0,
+      })),
+    ];
+    // L'oro col target sul patrimonio pesa come ETF + fisico.
+    if (goldOnTotal && goldEtf.identifier) {
+      positions.push({
+        name: goldEtf.name,
+        actualPct: pct(goldEtfValue + physGoldValue, grandTotal),
+        targetPct: goldEtf.targetWeight || 0,
+      });
+    }
+    return calcDrift(positions);
   }, [etfPortfolioAssets, totalTargetAssets, etfSubTotal, goldEtfValue, physGoldValue, grandTotal, goldEtf, goldOnTotal]);
+
+  const driftMax = drift.max;
+  const driftOver = driftMax > driftThreshold(settings.rebalanceBand ?? 0);
 
   // Livello 1: oro (ETF + fisico) + asset a target totale (Bitcoin, …)
   const rebalanceTwoLevel = useMemo(() => {
@@ -1521,7 +1553,8 @@ const refreshGoldPrices = useCallback(async () => {
     };
   }, [histForRisk, riskObs, settings.riskFree]);
 
-  const { data: snapshotChartData, assetIds } = useMemo(() => buildChartData(snapshots), [snapshots]);
+  const { data: snapshotChartData, assetIds, allIds } =
+    useMemo(() => buildChartData(snapshots), [snapshots]);
 
   // Palette del tema corrente. Lo slot dipende dalla posizione dell'asset, non dal suo valore.
   const palette = dark ? PALETTE_DARK : PALETTE_LIGHT;
@@ -1654,8 +1687,12 @@ const refreshGoldPrices = useCallback(async () => {
     m[snapKey(goldEtf)] = goldEtf.name.split(" ").slice(0, 3).join(" ");
   }
 
+  // Le righe non quotate compaiono nei grafici per chiave: senza etichetta la
+  // legenda mostrerebbe lo slug.
+  allIds.filter(isSynthetic).forEach((k) => { m[k] = syntheticLabel(k); });
+
   return m;
-}, [assets, goldEtf]);
+}, [assets, goldEtf, allIds]);
 
   // Solo gli ETF classici: gli asset a target totale (Bitcoin) vivono nella
   // sezione Oro & Bitcoin, insieme all'oro con cui condividono la logica di peso.
@@ -1738,9 +1775,19 @@ const refreshGoldPrices = useCallback(async () => {
           quantity: a.quantity, value: r2((a.lastPrice || 0) * (a.quantity || 0)),
         })),
         ...goldEtfSnap,
+        // Liquidità, oro fisico e startup sono dentro `totalValue` da sempre:
+        // senza una riga il loro movimento veniva attribuito al mercato (un
+        // acquisto pagato con la liquidità risultava una perdita, un versamento
+        // un guadagno). Vedi syntheticRows in metrics.js.
+        ...syntheticRows({
+          totalCash,
+          physGoldGrams: physGold.grams || 0,
+          physGoldPricePerGram: physGold.pricePerGram18kt || 0,
+          startupsValue: suTotal,
+        }),
       ],
     };
-  }, [assets, grandTotal, goldEtf]);
+  }, [assets, grandTotal, goldEtf, totalCash, physGold, suTotal]);
 
   const saveMonthlySnapshot = useCallback(async () => {
     const snapshotData = buildSnapshot();
@@ -1847,7 +1894,10 @@ const refreshGoldPrices = useCallback(async () => {
   const exportConfig = useCallback(() => {
     const config = {
       version: CONFIG_VERSION, exportedAt: new Date().toISOString(),
-      totalCash, startups, assetClasses, physGold, transactions,
+      // `settings` è nell'export perché ne fa parte: senza, un giro
+      // export → import perdeva in silenzio aliquota, benchmark, banda di
+      // ribilanciamento, inflazione, tasso privo di rischio e abbonamento.
+      totalCash, startups, assetClasses, physGold, transactions, settings,
       assets: storedAssets, goldEtf: storedGoldEtf,
     };
     const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
@@ -1857,7 +1907,7 @@ const refreshGoldPrices = useCallback(async () => {
     a.click();
     URL.revokeObjectURL(a.href);
     showCfgMsg("ok", "✓ Configurazione esportata");
-  }, [storedAssets, startups, totalCash, assetClasses, storedGoldEtf, physGold, transactions]);
+  }, [storedAssets, startups, totalCash, assetClasses, storedGoldEtf, physGold, transactions, settings]);
 
   const configImportRef = useRef(null);
   const importConfig = useCallback(async (file) => {
@@ -1875,12 +1925,15 @@ const refreshGoldPrices = useCallback(async () => {
       // Un export pre-v4 non ha il registro: si azzera, altrimenti i movimenti
       // di un portafoglio resterebbero appiccicati a quello importato.
       setTx(Array.isArray(config.transactions) ? config.transactions : []);
+      // Gli export senza `settings` (fino alla v4) lasciano le preferenze
+      // correnti; le chiavi mancanti in un file più vecchio prendono il default.
+      if (config.settings) setSettings({ ...DEFAULT_SETTINGS, ...config.settings });
       showCfgMsg("ok", `✓ Configurazione importata (${config.exportedAt?.slice(0,10) ?? "?"})`);
     } catch (e) {
       showCfgMsg("err", `Errore: ${e.message}`);
     }
     // I setter di useLS sono setter di useState: identità stabile, deps innocue.
-  }, [setAssets, setSU, setCash, setAC, setGoldEtf, setPhysGold, setTx]);
+  }, [setAssets, setSU, setCash, setAC, setGoldEtf, setPhysGold, setTx, setSettings]);
 
   const showCfgMsg = (type, text) => {
     setConfigMsg({ type, text });
@@ -2056,9 +2109,12 @@ const refreshGoldPrices = useCallback(async () => {
               trend={monthDelta?.pct} trendLabel={monthDelta ? `${fmt(monthDelta.abs)} vs ${monthDelta.label}` : null}
               footer={
                 <div className="hero-chips">
-                  <span className={`chip ${drift > 5 ? "chip-warn" : "chip-ok"}`}>
-                    {drift > 5 ? <AlertTriangle size={12}/> : <CheckCircle size={12}/>}
-                    Drift {drift.toFixed(1)}%
+                  <span className={`chip ${driftOver ? "chip-warn" : "chip-ok"}`}
+                    title={drift.worst
+                      ? `Scostamento maggiore: ${drift.worst.name} (${drift.worst.actualPct.toFixed(1)}% contro un target del ${drift.worst.targetPct}%)`
+                      : "Nessun target impostato"}>
+                    {driftOver ? <AlertTriangle size={12}/> : <CheckCircle size={12}/>}
+                    Deriva max {driftMax.toFixed(1)} pt
                   </span>
                   <span className="chip">
                     <Camera size={12}/> {snapshots.length} snapshot
@@ -3214,7 +3270,7 @@ const refreshGoldPrices = useCallback(async () => {
                     <XAxis dataKey="label" tick={{ fontSize: 11 }}/>
                     <YAxis tick={{ fontSize: 11 }} domain={[0, 100]} tickFormatter={(v) => `${v}%`}/>
                     <ReTooltip formatter={(v, k) => [`${v}%`, assetNameMap[k] || k]}/>
-                    {assetIds.map((k, i) => (
+                    {allIds.map((k, i) => (
                       <Area key={k} type="monotone" dataKey={k} stackId="alloc"
                         stroke={seriesColor(i)} fill={seriesColor(i)} fillOpacity={0.6}/>
                     ))}
@@ -3222,9 +3278,10 @@ const refreshGoldPrices = useCallback(async () => {
                 </ResponsiveContainer>
               </div>
               <p className="hint-text">
-                Peso percentuale di ogni asset quotato, mese per mese: mostra la deriva che la torta
-                di oggi non può far vedere. Liquidità, startup e oro fisico restano fuori — negli
-                snapshot ci sono solo gli asset con un prezzo.
+                Peso percentuale di ogni voce del patrimonio, mese per mese: mostra la deriva che la
+                torta di oggi non può far vedere. Liquidità, startup e oro fisico sono inclusi come
+                voci a sé. Sugli snapshot salvati prima compaiono raggruppati sotto
+                «Non quotato», perché allora venivano registrati solo nel totale.
               </p>
             </div>
           )}
@@ -3699,9 +3756,14 @@ const refreshGoldPrices = useCallback(async () => {
                 </div>
               )}
 
-              {drift > 5 && (
+              {driftOver && drift.worst && (
                 <div className="alert alert-amber">
-                  <AlertTriangle size={15}/> Drift del {drift.toFixed(1)}% — il portafoglio si è allontanato dai target.
+                  <AlertTriangle size={15}/>
+                  {" "}<strong>{drift.worst.name}</strong> è a {drift.worst.actualPct.toFixed(1)}%
+                  {" "}contro un target del {drift.worst.targetPct}%: {driftMax.toFixed(1)} punti di
+                  scostamento, oltre la soglia di {driftThreshold(settings.rebalanceBand ?? 0)}.
+                  {" "}Per rimettere tutto a target servirebbero {drift.sum.toFixed(1)} punti di
+                  spostamento complessivo.
                 </div>
               )}
             </div>

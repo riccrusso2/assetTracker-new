@@ -3,7 +3,9 @@ import {
   riskQuality, buildHistory, drawdownSeries, allocationOverTime,
   contributionByAsset, monthlyReturnsGrid, benchmarkSeries,
   MIN_OBS_RATIO,
+  syntheticRows, isSynthetic, syntheticLabel, SYNTHETIC_RESIDUAL,
 } from "./metrics";
+import { snapKey } from "./rebalance";
 
 const pos = (name, price, quantity, id = name) => ({ id, name, price, quantity, value: price * quantity });
 const snap = (label, year, month, totalValue, assets = []) => ({ label, year, month, totalValue, assets });
@@ -255,4 +257,95 @@ test("proiezione: senza prelievi il capitale non si esaurisce mai", () => {
 test("proiezione a zero anni: solo il punto di partenza", () => {
   const d = projectionScenarios({ start: 1000, monthly: 100, baseReturn: 7, years: 0 });
   expect(d).toEqual([{ year: 0, base: 1000, pessimistic: 1000, optimistic: 1000, real: 1000 }]);
+});
+
+// ====================== perimetro dello snapshot ======================
+// `totalValue` è sempre stato il patrimonio intero, mentre `assets[]` conteneva
+// le sole posizioni quotate. Con i due perimetri disallineati il flusso esterno
+// risultava sbagliato nei due versi, e da lì passano CAGR, volatilità, Sharpe,
+// Sortino, drawdown, heatmap e benchmark.
+
+const ret1 = (snaps) => calcReturns(buildHistory(snaps));
+
+test("comprare con la liquidità già in portafoglio non è una perdita", () => {
+  // 1000 di ETF + 1000 di cassa. Il mese dopo la cassa è diventata ETF: il
+  // patrimonio non si è mosso, quindi il rendimento è zero.
+  const before = snap("M0", 2026, 1, 2000, [
+    pos("etf", 100, 10), ...syntheticRows({ totalCash: 1000 }),
+  ]);
+  const after = snap("M1", 2026, 2, 2000, [pos("etf", 100, 20)]);
+  expect(ret1([before, after])).toEqual([0]);
+});
+
+test("un versamento in liquidità non è un guadagno", () => {
+  const before = snap("M0", 2026, 1, 2000, [
+    pos("etf", 100, 10), ...syntheticRows({ totalCash: 1000 }),
+  ]);
+  const after = snap("M1", 2026, 2, 4000, [
+    pos("etf", 100, 10), ...syntheticRows({ totalCash: 3000 }),
+  ]);
+  expect(ret1([before, after])).toEqual([0]);
+});
+
+test("snapshot vecchi: la parte non quotata si ricostruisce dal totale", () => {
+  // Nessuna riga sintetica, com'era prima: 1000 di ETF su 2000 di patrimonio.
+  // I 1000 mancanti devono comportarsi come la cassa del test sopra.
+  const before = snap("M0", 2026, 1, 2000, [pos("etf", 100, 10)]);
+  const after  = snap("M1", 2026, 2, 2000, [pos("etf", 100, 20)]);
+  expect(ret1([before, after])).toEqual([0]);
+});
+
+test("il mese di transizione al nuovo formato non inventa un flusso", () => {
+  // Prima l'oro fisico stava solo dentro totalValue, poi diventa una riga.
+  const legacy = snap("M0", 2026, 1, 1500, [pos("etf", 100, 10)]);
+  const nuovo  = snap("M1", 2026, 2, 1500, [
+    pos("etf", 100, 10),
+    ...syntheticRows({ physGoldGrams: 10, physGoldPricePerGram: 50 }),
+  ]);
+  expect(ret1([legacy, nuovo])).toEqual([0]);
+});
+
+test("l'oro fisico che si rivaluta è rendimento, non un versamento", () => {
+  const gold = (price) => syntheticRows({ physGoldGrams: 10, physGoldPricePerGram: price });
+  const before = snap("M0", 2026, 1, 1500, [pos("etf", 100, 10), ...gold(50)]);
+  const after  = snap("M1", 2026, 2, 1600, [pos("etf", 100, 10), ...gold(60)]);
+  const [r] = ret1([before, after]);
+  expect(r).toBeCloseTo(100 / 1500, 10);
+});
+
+test("una posizione liquidata del tutto è un prelievo, non una perdita", () => {
+  // Regressione: buildHistory iterava sulle sole chiavi del mese corrente, e
+  // un asset sparito non produceva flusso — il suo valore evaporava nel
+  // rendimento.
+  const before = snap("M0", 2026, 1, 1500, [pos("a", 100, 10), pos("b", 50, 10)]);
+  const after  = snap("M1", 2026, 2, 1000, [pos("a", 100, 10)]);
+  expect(ret1([before, after])).toEqual([0]);
+});
+
+test("le righe sintetiche si riconoscono per id e per chiave risolta", () => {
+  const rows = syntheticRows({
+    totalCash: 100, physGoldGrams: 5, physGoldPricePerGram: 60, startupsValue: 300,
+  });
+  expect(rows).toHaveLength(3);
+  expect(rows.every(isSynthetic)).toBe(true);
+  // I grafici ragionano per chiave, non per oggetto.
+  expect(rows.every((a) => isSynthetic(snapKey(a)))).toBe(true);
+  expect(rows.map((a) => syntheticLabel(snapKey(a))))
+    .toEqual(["Liquidità", "Oro fisico", "Startup"]);
+  expect(isSynthetic("etf")).toBe(false);
+  // Le voci a zero non producono righe.
+  expect(syntheticRows({ totalCash: 0, startupsValue: 0 })).toEqual([]);
+});
+
+test("la composizione nel tempo copre tutto il patrimonio, anche sugli snapshot vecchi", () => {
+  const legacy = snap("M0", 2026, 1, 2000, [pos("etf", 100, 10)]);
+  const nuovo  = snap("M1", 2026, 2, 2000, [
+    pos("etf", 100, 10), ...syntheticRows({ totalCash: 1000 }),
+  ]);
+  const [a, b] = allocationOverTime([legacy, nuovo]);
+  // Prima: metà quotato, metà "non quotato" — non 100% di ETF.
+  expect(a.etf).toBe(50);
+  expect(a[SYNTHETIC_RESIDUAL]).toBe(50);
+  expect(b.etf).toBe(50);
+  expect(b[snapKey({ id: "__cash__", name: "Liquidità" })]).toBe(50);
 });
