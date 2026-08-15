@@ -174,27 +174,6 @@ export const calcConcentration = (positions = [], total = 0) => {
   };
 };
 
-// Attribuzione crescita mese su mese (solo asset quotati negli snapshot):
-// versamenti ≈ Σ Δquantità × prezzo del mese; mercato = Δvalore − versamenti.
-// ponytail: approssima gli acquisti al prezzo di fine mese — per precisione
-// servirebbe il log delle transazioni.
-export const calcGrowthAttribution = (snapshots) => {
-  const rows = [];
-  for (let i = 1; i < snapshots.length; i++) {
-    const prev = snapshots[i - 1], cur = snapshots[i];
-    const prevQ = {};
-    let prevVal = 0;
-    (prev.assets || []).forEach((a) => { prevQ[snapKey(a)] = a.quantity || 0; prevVal += a.value || 0; });
-    let curVal = 0, contrib = 0;
-    (cur.assets || []).forEach((a) => {
-      curVal  += a.value || 0;
-      contrib += ((a.quantity || 0) - (prevQ[snapKey(a)] || 0)) * (a.price || 0);
-    });
-    rows.push({ label: cur.label, contrib: r2(contrib), market: r2(curVal - prevVal - contrib) });
-  }
-  return rows;
-};
-
 // ====================== STARTUP LIFECYCLE ======================
 // Ogni startup ha un esito: attiva (default), exit (incasso), fallita (valore 0).
 // Config precedenti non hanno `status`: valgono come attive.

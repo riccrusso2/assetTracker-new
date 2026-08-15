@@ -211,6 +211,25 @@ export const periodReturn = (snapshots) => {
   return r.reduce((acc, x) => acc * (1 + x), 1) - 1;
 };
 
+// Attribuzione mese su mese: quanto è entrato di tasca e quanto ha fatto il
+// mercato. Sta qui e non in rebalance.js perché è la stessa scomposizione delle
+// metriche di rendimento, e averne due implementazioni le faceva divergere:
+// quella vecchia leggeva le righe dello snapshot senza sapere del residuo, e
+// nel mese in cui sono comparse le righe non quotate leggeva l'intera
+// liquidità come un versamento di 20.000 €.
+export const growthAttribution = (snapshots) => {
+  const pts = buildHistory(snapshots);
+  const rows = [];
+  for (let i = 1; i < pts.length; i++) {
+    rows.push({
+      label: snapshots[i].label,
+      contrib: r2(pts[i].cf),
+      market:  r2(pts[i].v - pts[i - 1].v - pts[i].cf),
+    });
+  }
+  return rows;
+};
+
 // Curva di drawdown: quanto si è sotto il massimo raggiunto, mese per mese.
 // Il numero singolo dice quanto è stata profonda la buca; la curva dice anche
 // quanto è durata, che è ciò che si sopporta davvero.

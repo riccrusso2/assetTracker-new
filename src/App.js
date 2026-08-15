@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import "./styles.css";
 import {
-  r2, snapKey, isTotalTargetAsset, calcRebalancingTwoLevel, calcGrowthAttribution,
+  r2, snapKey, isTotalTargetAsset, calcRebalancingTwoLevel,
   suStatus, calcStartupPortfolio, calcDrift, driftThreshold,
   startupCashFlows, startupHoldings, calcConcentration,
 } from "./rebalance";
@@ -30,7 +30,7 @@ import {
   riskQuality, buildHistory, drawdownSeries, allocationOverTime,
   contributionByAsset, monthlyReturnsGrid, benchmarkSeries, OBS_RELIABLE,
   projectionScenarios, depletionYear, syntheticRows, isSynthetic, syntheticLabel,
-  SYNTHETIC_RESIDUAL, PERIODS, sliceSnapshots, periodReturn,
+  SYNTHETIC_RESIDUAL, PERIODS, sliceSnapshots, periodReturn, growthAttribution,
 } from "./metrics";
 import { taxReport, bolloTitoli, latentTax, DEFAULT_TAX } from "./tax";
 import { apiFetch } from "./api";
@@ -1818,11 +1818,11 @@ const refreshGoldPrices = useCallback(async () => {
     return cost > 0 ? r2((txRealized.income / cost) * 100) : null;
   }, [txRealized.income, transactions, assets, goldEtf]);
 
-  const growthAttribution = useMemo(() => calcGrowthAttribution(snapshots), [snapshots]);
+  const growthRows = useMemo(() => growthAttribution(snapshots), [snapshots]);
   const growthTotals = useMemo(() => ({
-    contrib: r2(growthAttribution.reduce((a, x) => a + x.contrib, 0)),
-    market:  r2(growthAttribution.reduce((a, x) => a + x.market, 0)),
-  }), [growthAttribution]);
+    contrib: r2(growthRows.reduce((a, x) => a + x.contrib, 0)),
+    market:  r2(growthRows.reduce((a, x) => a + x.market, 0)),
+  }), [growthRows]);
 
   const assetNameMap = useMemo(() => {
   const m = {};
@@ -2457,13 +2457,13 @@ const refreshGoldPrices = useCallback(async () => {
           </div>
 
 
-          {growthAttribution.length > 0 && (
+          {growthRows.length > 0 && (
             <div className="section-card">
               <h3 className="section-title"><TrendingUp size={16}/> Crescita: versamenti vs mercato</h3>
               <div className="kpi-mini-row" style={{ marginBottom: 12 }}>
                 <span>Versamenti: <strong style={{ color: "var(--blue)" }}>{fmt(growthTotals.contrib)}</strong></span>
                 <span>Mercato: <strong style={{ color: growthTotals.market >= 0 ? "var(--green)" : "var(--red)" }}>{fmt(growthTotals.market)}</strong></span>
-                <span className="muted" style={{ fontSize: 12 }}>Solo asset quotati, stimato dagli snapshot mensili</span>
+                <span className="muted" style={{ fontSize: 12 }}>Tutto il patrimonio, dagli snapshot mensili</span>
               </div>
               <div className="chart-legend">
                 <span className="cl-item"><span className="cl-swatch" style={{ background: C_CONTRIB }}/>Versamenti</span>
@@ -2472,7 +2472,7 @@ const refreshGoldPrices = useCallback(async () => {
               </div>
               <div style={{ height: 240 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={growthAttribution} margin={{ top: 4, right: 16, left: 0, bottom: 4 }} barGap={2}>
+                  <BarChart data={growthRows} margin={{ top: 4, right: 16, left: 0, bottom: 4 }} barGap={2}>
                     <CartesianGrid stroke="var(--border)" vertical={false}/>
                     <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="var(--text-muted)"/>
                     <YAxis tickFormatter={(v) => `€${(v / 1000).toFixed(1)}k`} tick={{ fontSize: 10 }} stroke="var(--text-muted)" width={56}/>
@@ -2480,7 +2480,7 @@ const refreshGoldPrices = useCallback(async () => {
                     <ReferenceLine y={0} stroke="var(--border2)"/>
                     <Bar dataKey="contrib" name="Versamenti" fill={C_CONTRIB} radius={[4, 4, 0, 0]}/>
                     <Bar dataKey="market"  name="Mercato" fill={C_GAIN} radius={[4, 4, 0, 0]}>
-                      {growthAttribution.map((d, i) => (
+                      {growthRows.map((d, i) => (
                         <Cell key={i} fill={d.market >= 0 ? C_GAIN : C_LOSS}/>
                       ))}
                     </Bar>

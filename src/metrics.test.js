@@ -4,9 +4,9 @@ import {
   contributionByAsset, monthlyReturnsGrid, benchmarkSeries,
   MIN_OBS_RATIO,
   syntheticRows, isSynthetic, syntheticLabel, SYNTHETIC_RESIDUAL,
-  sliceSnapshots, periodReturn,
+  sliceSnapshots, periodReturn, growthAttribution,
 } from "./metrics";
-import { snapKey } from "./rebalance";
+import { snapKey, r2 } from "./rebalance";
 
 const pos = (name, price, quantity, id = name) => ({ id, name, price, quantity, value: price * quantity });
 const snap = (label, year, month, totalValue, assets = []) => ({ label, year, month, totalValue, assets });
@@ -403,5 +403,59 @@ describe("sliceSnapshots / periodReturn", () => {
       snap("M2", 2026, 3, 1310, [pos("etf", 121, 10), ...syntheticRows({ totalCash: 100 })]),
     ];
     expect(periodReturn(s)).toBeCloseTo(0.21, 6);
+  });
+});
+
+// ====================== attribuzione della crescita ======================
+
+describe("growthAttribution", () => {
+  test("separa i versamenti dal mercato", () => {
+    const snaps = [
+      snap("Gen", 2026, 1, 1000, [pos("a", 100, 10)]),
+      // +5 quote a 110 → versamento 550; mercato: 10 quote × (110−100) = 100
+      snap("Feb", 2026, 2, 1650, [pos("a", 110, 15)]),
+    ];
+    const rows = growthAttribution(snaps);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({ label: "Feb", contrib: 550, market: 100 });
+  });
+
+  // Regressione: quando le righe non quotate sono comparse per la prima volta
+  // (liquidità, oro fisico, startup), il mese di transizione le leggeva come
+  // posizioni appena acquistate — sul portafoglio reale ~21.000 € di versamenti
+  // inventati in un mese in cui ne erano entrati 1.500.
+  test("il mese in cui compaiono le righe non quotate non inventa un versamento", () => {
+    const nonQuotato = { totalCash: 10_150, physGoldGrams: 55.93,
+                         physGoldPricePerGram: 88.04, startupsValue: 4_748 };
+    const nonQuotatoTot = 10_150 + 55.93 * 88.04 + 4_748;   // 19.821,87
+
+    // Luglio, formato vecchio: le voci non quotate stanno solo dentro il totale.
+    const lug = snap("Lug", 2026, 7, r2(14_971.44 + nonQuotatoTot),
+      [pos("FTSE All-World", 159, 94.16)]);
+    // Agosto, formato nuovo: le stesse voci diventano righe. L'unico movimento
+    // reale del mese è l'acquisto di 9,44 quote di ETF, cioè 1.500,96 €.
+    const ago = snap("Ago", 2026, 8, r2(16_472.4 + nonQuotatoTot), [
+      pos("FTSE All-World", 159, 103.6),
+      ...syntheticRows(nonQuotato),
+    ]);
+
+    const [row] = growthAttribution([lug, ago]);
+    expect(row.contrib).toBeCloseTo(1_500.96, 1);
+    expect(row.market).toBeCloseTo(0, 1);
+    // Prima della correzione qui comparivano 21.322,83 € di versamenti, cioè
+    // l'intero blocco non quotato letto come se fosse stato comprato quel mese.
+    expect(row.contrib).toBeLessThan(2_000);
+  });
+
+  test("è coerente con i rendimenti: mercato = variazione − flussi", () => {
+    const snaps = [
+      snap("M0", 2026, 1, 2000, [pos("etf", 100, 10), ...syntheticRows({ totalCash: 1000 })]),
+      // Comprati 1000 di ETF con la cassa: nessun versamento, nessun mercato.
+      snap("M1", 2026, 2, 2000, [pos("etf", 100, 20)]),
+    ];
+    const [row] = growthAttribution(snaps);
+    expect(row.contrib).toBe(0);
+    expect(row.market).toBe(0);
+    expect(periodReturn(snaps)).toBe(0);
   });
 });

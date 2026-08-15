@@ -1,6 +1,6 @@
 import {
   r2, isTotalTargetAsset, calcRebalancing, calcRebalancingTwoLevel,
-  calcGrowthAttribution, calcStartupMetrics, calcStartupPortfolio,
+  calcStartupMetrics, calcStartupPortfolio,
   calcDrift, driftThreshold, DRIFT_ALERT_PP,
   startupCashFlows, startupHoldings, calcConcentration,
 } from "./rebalance";
@@ -93,18 +93,6 @@ test("calcRebalancing buy-only alloca tutto il budget e non vende", () => {
   const tot = r2(actions.reduce((s, x) => s + x.monthlyBuy, 0));
   expect(tot).toBe(500);
   expect(actions.every((x) => x.monthlyBuy >= 0)).toBe(true);
-});
-
-test("attribuzione crescita: versamenti vs mercato", () => {
-  const snaps = [
-    { label: "Gen", assets: [{ id: "a", quantity: 10, price: 100, value: 1000 }] },
-    // +5 quote a 110 → versamento 550; mercato: 10 quote × (110−100) = 100
-    { label: "Feb", assets: [{ id: "a", quantity: 15, price: 110, value: 1650 }] },
-  ];
-  const rows = calcGrowthAttribution(snaps);
-  expect(rows).toHaveLength(1);
-  expect(rows[0].contrib).toBe(550);
-  expect(rows[0].market).toBe(100);
 });
 
 // ====================== STARTUP LIFECYCLE ======================
