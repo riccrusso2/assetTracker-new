@@ -173,6 +173,44 @@ export const buildHistory = (snapshots) => {
   return pts;
 };
 
+// ====================== FINESTRA TEMPORALE ======================
+// Tutte le analisi erano "dall'inizio": con tre anni di storico non c'era modo
+// di guardare l'ultimo anno. Le funzioni qui sotto sono già pure e prendono un
+// array, quindi basta tagliarlo prima di passarlo.
+export const PERIODS = [
+  { id: "all", label: "Tutto" },
+  { id: "ytd", label: "YTD" },
+  { id: "1y",  label: "1 anno" },
+  { id: "3y",  label: "3 anni" },
+];
+
+const snapDate = (s) => new Date(s.year, (s.month || 1) - 1, 1);
+
+export const sliceSnapshots = (snapshots, period, now = new Date()) => {
+  const list = snapshots || [];
+  if (!list.length || !period || period === "all") return list;
+  const y = now.getFullYear(), mNext = now.getMonth() + 1;
+  const cutoff =
+    period === "ytd" ? new Date(y, 0, 1) :
+    period === "1y"  ? new Date(y - 1, mNext, 1) :
+    period === "3y"  ? new Date(y - 3, mNext, 1) : null;
+  if (!cutoff) return list;
+
+  const idx = list.findIndex((s) => snapDate(s) >= cutoff);
+  if (idx < 0) return [];       // tutto lo storico è più vecchio del periodo
+  // Si tiene anche lo snapshot precedente: è il punto di partenza da cui si
+  // misura il primo rendimento del periodo. Senza, il primo mese sparirebbe
+  // dal conto — `returnsIndexed` parte da i = 1.
+  return list.slice(Math.max(0, idx - 1));
+};
+
+// Rendimento composto del periodo, al netto dei versamenti.
+export const periodReturn = (snapshots) => {
+  const r = calcReturns(buildHistory(snapshots));
+  if (!r.length) return null;
+  return r.reduce((acc, x) => acc * (1 + x), 1) - 1;
+};
+
 // Curva di drawdown: quanto si è sotto il massimo raggiunto, mese per mese.
 // Il numero singolo dice quanto è stata profonda la buca; la curva dice anche
 // quanto è durata, che è ciò che si sopporta davvero.

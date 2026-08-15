@@ -19,6 +19,7 @@ import "./styles.css";
 import {
   r2, snapKey, isTotalTargetAsset, calcRebalancingTwoLevel, calcGrowthAttribution,
   suStatus, calcStartupPortfolio, calcDrift, driftThreshold,
+  startupCashFlows, startupHoldings, calcConcentration,
 } from "./rebalance";
 import {
   TX_TYPES, TX_LABELS, txKey, txCashFlow, holdingFor,
@@ -29,7 +30,7 @@ import {
   riskQuality, buildHistory, drawdownSeries, allocationOverTime,
   contributionByAsset, monthlyReturnsGrid, benchmarkSeries, OBS_RELIABLE,
   projectionScenarios, depletionYear, syntheticRows, isSynthetic, syntheticLabel,
-  SYNTHETIC_RESIDUAL,
+  SYNTHETIC_RESIDUAL, PERIODS, sliceSnapshots, periodReturn,
 } from "./metrics";
 import { taxReport, bolloTitoli, latentTax, DEFAULT_TAX } from "./tax";
 import { apiFetch } from "./api";
@@ -322,8 +323,46 @@ const EmptyState = ({ icon: Icon, title, description, action }) => (
   </div>
 );
 
+// ---- Comportamento comune degli 8 modali ----
+// Esc per chiudere, fuoco portato dentro all'apertura e Tab che ci resta.
+// Senza il confinamento il Tab esce dal dialogo e continua a girare sulla
+// pagina sotto, che è ancora lì ma non è più raggiungibile con lo sguardo.
+// Restituisce il ref da mettere sul contenitore del dialogo.
+const useModalA11y = (onClose) => {
+  const ref = useRef(null);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node) return;
+    const prevFocus = document.activeElement;
+    const focusables = () => [...node.querySelectorAll(
+      'button, [href], input:not([type="hidden"]), select, textarea, [tabindex]:not([tabindex="-1"])',
+    )].filter((el) => !el.disabled && el.offsetParent !== null);
+
+    focusables()[0]?.focus();
+
+    const onKey = (e) => {
+      if (e.key === "Escape") { e.stopPropagation(); onClose?.(); return; }
+      if (e.key !== "Tab") return;
+      const list = focusables();
+      if (!list.length) return;
+      const first = list[0], last = list[list.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    node.addEventListener("keydown", onKey);
+    return () => {
+      node.removeEventListener("keydown", onKey);
+      // Chi ha aperto il modale riprende il fuoco: senza, torna sul <body> e
+      // la navigazione da tastiera riparte dall'inizio della pagina.
+      if (prevFocus instanceof HTMLElement) prevFocus.focus();
+    };
+  }, [onClose]);
+  return ref;
+};
+
 // ---- Asset Class Manager Modal ----
 const AssetClassModal = ({ classes, onSave, onClose }) => {
+  const dialogRef = useModalA11y(onClose);
   const [list, setList] = useState([...classes]);
   const [newName, setNewName] = useState("");
   const [editIdx, setEditIdx] = useState(null);
@@ -349,7 +388,7 @@ const AssetClassModal = ({ classes, onSave, onClose }) => {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
+      <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
         <div className="modal-header">
           <h3><Tag size={16} style={{ marginRight: 8 }}/>Gestisci Asset Class</h3>
           <button className="icon-btn" onClick={onClose}><X size={18}/></button>
@@ -400,6 +439,7 @@ const AssetClassModal = ({ classes, onSave, onClose }) => {
 // fromTx: la posizione è calcolata dal registro movimenti, quindi quantità e
 // prezzo medio di carico non si toccano da qui — si correggono i movimenti.
 const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, fromTx = false, onSave, onClose }) => {
+  const dialogRef = useModalA11y(onClose);
   const [form, setForm] = useState({
     name: "", identifier: "", quantity: "", costBasis: "",
     targetWeight: "", assetClass: assetClasses[0] || "ETF", currency: "EUR",
@@ -429,7 +469,7 @@ const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, fromTx = false, 
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{asset?.id ? "Modifica asset" : "Aggiungi asset"}</h3>
           <button className="icon-btn" onClick={onClose}><X size={18}/></button>
@@ -497,9 +537,10 @@ const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, fromTx = false, 
 
 // ---- Modal Startup ----
 const StartupModal = ({ startup, onSave, onClose }) => {
+  const dialogRef = useModalA11y(onClose);
   const [form, setForm] = useState(
     startup?.id ? { ...startup, status: suStatus(startup) }
-                : { name: "", invested: "", fee: "", status: "active" });
+                : { name: "", invested: "", fee: "", status: "active", date: "" });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
   const handleSave = () => {
     if (!form.name || !form.invested) return;
@@ -509,8 +550,12 @@ const StartupModal = ({ startup, onSave, onClose }) => {
       invested: parseFloat(form.invested) || 0,
       fee: parseFloat(form.fee) || 0,
       status,
+      // Senza la data l'investimento non ha durata: niente holding period e
+      // niente IRR. È opzionale perché le posizioni già inserite non ce l'hanno.
+      date: form.date || undefined,
       // Exit: importo incassato + note. Fallita/Attiva: campi ripuliti.
       exitAmount: status === "exit" ? (parseFloat(form.exitAmount) || 0) : undefined,
+      exitDate:   status === "exit" ? (form.exitDate || undefined) : undefined,
       exitNotes:  status === "exit" ? (form.exitNotes || "").trim() || undefined : undefined,
       // Attiva: valutazione odierna opzionale (round successivi).
       currentValue: status === "active" && `${form.currentValue ?? ""}` !== ""
@@ -520,7 +565,7 @@ const StartupModal = ({ startup, onSave, onClose }) => {
   };
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{startup?.id ? "Modifica startup" : "Aggiungi startup"}</h3>
           <button className="icon-btn" onClick={onClose}><X size={18}/></button>
@@ -534,6 +579,9 @@ const StartupModal = ({ startup, onSave, onClose }) => {
           </label>
           <label className="field-label">Commissioni (€)
             <input type="number" step="any" value={form.fee} onChange={(e) => set("fee", e.target.value)} className="field-input"/>
+          </label>
+          <label className="field-label">Data investimento
+            <input type="date" value={form.date ?? ""} onChange={(e) => set("date", e.target.value)} className="field-input"/>
           </label>
           <label className="field-label">Stato
             <select value={form.status || "active"} onChange={(e) => set("status", e.target.value)} className="field-input">
@@ -552,6 +600,9 @@ const StartupModal = ({ startup, onSave, onClose }) => {
             <>
               <label className="field-label">Importo incassato dall'exit (€) *
                 <input type="number" step="any" value={form.exitAmount ?? ""} onChange={(e) => set("exitAmount", e.target.value)} className="field-input"/>
+              </label>
+              <label className="field-label">Data dell'exit
+                <input type="date" value={form.exitDate ?? ""} onChange={(e) => set("exitDate", e.target.value)} className="field-input"/>
               </label>
               <label className="field-label">Note (opzionale)
                 <textarea rows={3} value={form.exitNotes ?? ""} onChange={(e) => set("exitNotes", e.target.value)} className="field-input"
@@ -582,6 +633,7 @@ const StartupModal = ({ startup, onSave, onClose }) => {
 // cui copiare le posizioni quando se ne crea uno nuovo — senza, il mese
 // aggiunto spezzerebbe i grafici per asset.
 const SnapshotModal = ({ snap, preset, nearest, taken, onSave, onClose }) => {
+  const dialogRef = useModalA11y(onClose);
   const now = new Date();
   const [form, setForm] = useState(snap || preset || {
     year: now.getFullYear(), month: now.getMonth() + 1, totalValue: "",
@@ -609,7 +661,7 @@ const SnapshotModal = ({ snap, preset, nearest, taken, onSave, onClose }) => {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{editing ? `Modifica snapshot ${snap.label}` : "Aggiungi snapshot"}</h3>
           <button className="icon-btn" onClick={onClose}><X size={18}/></button>
@@ -657,6 +709,7 @@ const SnapshotModal = ({ snap, preset, nearest, taken, onSave, onClose }) => {
 // options: [{ key, name }] — gli asset quotati su cui si può registrare un
 // movimento. La chiave è quella degli snapshot (nome slugificato), non l'id.
 const TxModal = ({ tx, options, onSave, onClose }) => {
+  const dialogRef = useModalA11y(onClose);
   const today = new Date().toISOString().slice(0, 10);
   const [form, setForm] = useState(
     tx?.id ? { ...tx }
@@ -696,7 +749,7 @@ const TxModal = ({ tx, options, onSave, onClose }) => {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{tx?.id ? "Modifica movimento" : "Aggiungi movimento"}</h3>
           <button className="icon-btn" onClick={onClose}><X size={18}/></button>
@@ -759,6 +812,7 @@ const TxModal = ({ tx, options, onSave, onClose }) => {
 // ---- Modal Gold ETF ----
 // etfTargetOthers: somma dei target degli altri asset del sotto-portafoglio ETF.
 const GoldEtfModal = ({ goldEtf, etfTargetOthers = 0, fromTx = false, onSave, onClose }) => {
+  const dialogRef = useModalA11y(onClose);
   const [form, setForm] = useState({ ...goldEtf });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -781,7 +835,7 @@ const GoldEtfModal = ({ goldEtf, etfTargetOthers = 0, fromTx = false, onSave, on
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>⚙️ Configura ETF Oro quotato</h3>
           <button className="icon-btn" onClick={onClose}><X size={18}/></button>
@@ -848,6 +902,7 @@ const GoldEtfModal = ({ goldEtf, etfTargetOthers = 0, fromTx = false, onSave, on
 // ---- Modal Physical Gold ----
 // No cost basis — only grams and optional manual price override
 const PhysGoldModal = ({ physGold, onSave, onClose }) => {
+  const dialogRef = useModalA11y(onClose);
   const [form, setForm] = useState({ ...physGold });
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -871,7 +926,7 @@ const PhysGoldModal = ({ physGold, onSave, onClose }) => {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
+      <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>🔶 Oro fisico 18kt</h3>
           <button className="icon-btn" onClick={onClose}><X size={18}/></button>
@@ -964,6 +1019,7 @@ const SnapshotTooltip = ({ active, payload, label, snapshots }) => {
 // Gestisce il link pubblico read-only: crea/riusa il token, copia negli
 // appunti, revoca. Lo stato reale vive sul server (/api/share).
 const ShareModal = ({ onClose }) => {
+  const dialogRef = useModalA11y(onClose);
   const [state,   setState]   = useState(null);   // { enabled, token }
   const [loading, setLoading] = useState(true);
   const [err,     setErr]     = useState(null);
@@ -1011,7 +1067,7 @@ const ShareModal = ({ onClose }) => {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
+      <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
         <div className="modal-header">
           <h3><Share2 size={16} style={{ marginRight: 8 }}/> Condividi portafoglio</h3>
           <button className="icon-btn" onClick={onClose}><X size={18}/></button>
@@ -1158,7 +1214,20 @@ export default function App({ session, shareToken } = {}) {
 
   const [snapshots,      setSnapshots]    = useState([]);
   const [snapshotSaving, setSnapSaving]   = useState(false);
-  const [snapshotMsg,    setSnapMsg]      = useState(null);
+
+  // ---- Feedback delle azioni ----
+  // Prima c'erano due stati distinti resi in due punti fissi della pagina:
+  // il messaggio degli snapshot viveva nell'header di un grafico in Overview,
+  // ma tre delle quattro azioni che lo impostano partono dalla tab Analisi.
+  // Chi cancellava uno snapshot non vedeva né conferma né errore.
+  const [toast, setToast] = useState(null);
+  const toastTimer = useRef(null);
+  const showToast = useCallback((type, text) => {
+    clearTimeout(toastTimer.current);
+    setToast({ type, text });
+    toastTimer.current = setTimeout(() => setToast(null), 5000);
+  }, []);
+  useEffect(() => () => clearTimeout(toastTimer.current), []);
 
   const [hiddenLines,  setHiddenLines]  = useState(new Set());
   const [focusedLine,  setFocusedLine]  = useState(null);
@@ -1173,7 +1242,6 @@ export default function App({ session, shareToken } = {}) {
   const [shareModal,    setShareModal]   = useState(false);
   const [editCash,      setEditCash]     = useState(false);
   const [cashInput,     setCashInput]    = useState("");
-  const [configMsg,     setConfigMsg]    = useState(null);
   const [txModal,       setTxModal]      = useState(null);
   const [snapModal,     setSnapModal]    = useState(null);
 
@@ -1211,12 +1279,29 @@ export default function App({ session, shareToken } = {}) {
   // (dove verrebbe dimenticata alla prima colonna aggiunta).
   // ponytail: scritto sul DOM perché è un attributo che React non gestisce;
   // solo il tbody, il tfoot usa colSpan e non allinea con l'header.
+  // Sotto i 640px `display: block` su tutte le parti della tabella cancella la
+  // semantica tabellare: uno screen reader smette di annunciare "colonna X,
+  // riga Y" e legge una sequenza piatta di numeri senza sapere cosa sono.
+  // I ruoli espliciti la rimettono, e `content: attr(data-label)` non basta
+  // perché il contenuto generato dal CSS non è testo accessibile affidabile.
   useEffect(() => {
+    const role = (el, value) => { if (el.getAttribute("role") !== value) el.setAttribute("role", value); };
     document.querySelectorAll("table.data-table").forEach((table) => {
       const labels = [...table.querySelectorAll("thead th")].map((th) => th.textContent.trim());
-      table.querySelectorAll("tbody tr").forEach((tr) => {
-        [...tr.children].forEach((td, i) => { td.dataset.label = labels[i] || ""; });
+      role(table, "table");
+      table.querySelectorAll("thead, tbody, tfoot").forEach((g) => role(g, "rowgroup"));
+      table.querySelectorAll("tr").forEach((tr) => role(tr, "row"));
+      table.querySelectorAll("thead th").forEach((th) => {
+        role(th, "columnheader");
+        if (!th.hasAttribute("scope")) th.setAttribute("scope", "col");
       });
+      table.querySelectorAll("tbody tr").forEach((tr) => {
+        [...tr.children].forEach((td, i) => {
+          role(td, "cell");
+          td.dataset.label = labels[i] || "";
+        });
+      });
+      table.querySelectorAll("tfoot td").forEach((td) => role(td, "cell"));
     });
   });
 
@@ -1430,6 +1515,16 @@ const refreshGoldPrices = useCallback(async () => {
   const suTotal    = startupStats.activeVal;   // solo startup attive → patrimonio
   const suFees     = startupStats.feesTot;
   const suAbbonamenti = startupStats.subscription;
+
+  // Rendimento e orizzonte del book startup. Il ROI da solo non basta su
+  // posizioni illiquide: 300 € che tornano 400 € valgono diversamente dopo due
+  // o dopo otto anni. Richiede la data, quindi resta null finché non c'è.
+  const suHoldings = useMemo(
+    () => startupHoldings(startups, new Date().toISOString().slice(0, 10)),
+    [startups]);
+  const suIrr = useMemo(
+    () => xirr(startupCashFlows(startups, new Date().toISOString().slice(0, 10))),
+    [startups]);
   const grandTotal = totals.val + totalCash + physGoldValue + suTotal;
 
   // Peso dell'oro nella base coerente col suo target: sul patrimonio conta la
@@ -1537,7 +1632,13 @@ const refreshGoldPrices = useCallback(async () => {
   const projGain     = finalVal - totalContrib;
   const projROI      = totalContrib > 0 ? (projGain / totalContrib) * 100 : 0;
 
-  const histForRisk = useMemo(() => buildHistory(snapshots), [snapshots]);
+  // ---- Finestra temporale delle analisi ----
+  // Le funzioni di metrics.js sono pure e prendono un array: basta tagliarlo
+  // prima. `snapshots` resta intatto per Overview, che mostra sempre tutto.
+  const [period, setPeriod] = useState("all");
+  const anaSnaps = useMemo(() => sliceSnapshots(snapshots, period), [snapshots, period]);
+
+  const histForRisk = useMemo(() => buildHistory(anaSnaps), [anaSnaps]);
   const riskObs = useMemo(() => calcReturns(histForRisk).length, [histForRisk]);
 
   const riskMetrics = useMemo(() => {
@@ -1583,6 +1684,18 @@ const refreshGoldPrices = useCallback(async () => {
 
   const txRealized = useMemo(() => portfolioRealized(transactions), [transactions]);
 
+  // `withHolding` teneva solo quantità e prezzo di carico e buttava via il
+  // resto: realizzato, dividendi e commissioni erano calcolati per ogni asset e
+  // non arrivavano mai a schermo. Qui si conservano, indicizzati per chiave.
+  const holdingByKey = useMemo(() => {
+    const m = {};
+    for (const a of [...storedAssets, storedGoldEtf]) {
+      const h = holdingFor(a, transactions);
+      if (h.fromTx) m[txKey(a)] = h;
+    }
+    return m;
+  }, [storedAssets, storedGoldEtf, transactions]);
+
   // Flusso finale dell'XIRR: solo le posizioni che hanno un registro. Sommarci
   // anche quelle inserite a mano gonfierebbe l'incasso finale senza i relativi
   // esborsi, e il rendimento risulterebbe assurdo.
@@ -1597,12 +1710,25 @@ const refreshGoldPrices = useCallback(async () => {
     [transactions, txCurrentValue]);
 
   // ---- Analisi storiche (tutte derivate dagli snapshot) ----
-  const ddSeries      = useMemo(() => drawdownSeries(snapshots), [snapshots]);
-  const allocSeries   = useMemo(() => allocationOverTime(snapshots), [snapshots]);
-  const contribByAsset= useMemo(() => contributionByAsset(snapshots), [snapshots]);
-  const returnsGrid   = useMemo(() => monthlyReturnsGrid(snapshots), [snapshots]);
+  // Rendimento del periodo scelto, composto e al netto dei versamenti. Il CAGR
+  // resta la lettura annualizzata; su una finestra corta è questo il numero che
+  // risponde a "come sto andando".
+  const periodRet = useMemo(() => periodReturn(anaSnaps), [anaSnaps]);
+
+  // Concentrazione sul patrimonio: la torta per classe non la mostra, perché
+  // cinque ETF azionari globali sono cinque fette ma una scommessa sola.
+  const concentration = useMemo(() => calcConcentration(
+    [...assets, goldEtf]
+      .filter((a) => a?.lastPrice && a?.quantity)
+      .map((a) => ({ name: a.name, value: a.lastPrice * a.quantity })),
+    grandTotal), [assets, goldEtf, grandTotal]);
+
+  const ddSeries      = useMemo(() => drawdownSeries(anaSnaps), [anaSnaps]);
+  const allocSeries   = useMemo(() => allocationOverTime(anaSnaps), [anaSnaps]);
+  const contribByAsset= useMemo(() => contributionByAsset(anaSnaps), [anaSnaps]);
+  const returnsGrid   = useMemo(() => monthlyReturnsGrid(anaSnaps), [anaSnaps]);
   const benchSeries   = useMemo(
-    () => benchmarkSeries(snapshots, settings.benchmarkKey), [snapshots, settings.benchmarkKey]);
+    () => benchmarkSeries(anaSnaps, settings.benchmarkKey), [anaSnaps, settings.benchmarkKey]);
 
   // ---- Fisco ----
   // Metadati per chiave: servono a sapere la categoria fiscale di ogni titolo.
@@ -1636,6 +1762,27 @@ const refreshGoldPrices = useCallback(async () => {
   // totals.val comprende già l'ETF oro (vedi calcTotals): sommarlo di nuovo
   // raddoppierebbe la base del bollo.
   const bollo = useMemo(() => bolloTitoli(totals.val, taxCfg), [totals.val, taxCfg]);
+
+  // ---- Costi ----
+  // I tre pezzi esistevano già, in tre punti diversi, e non venivano mai
+  // sommati. Restano però su due orizzonti diversi e mescolarli darebbe un
+  // numero senza significato: il bollo e l'abbonamento sono ricorrenti annui,
+  // le commissioni sono quanto si è pagato finora. Si tengono separati.
+  const costs = useMemo(() => {
+    const recurringYear = r2(bollo + (settings.startupSubscription ?? 0));
+    const paidToDate    = r2(txRealized.fees + startupStats.feesTot);
+    return {
+      bollo,
+      subscription: r2(settings.startupSubscription ?? 0),
+      txFees: txRealized.fees,
+      startupFees: startupStats.feesTot,
+      recurringYear,
+      paidToDate,
+      // L'incidenza si misura sui costi ricorrenti: è quella che erode il
+      // rendimento ogni anno, mentre le commissioni sono già state pagate.
+      recurringPct: grandTotal > 0 ? r2((recurringYear / grandTotal) * 100) : null,
+    };
+  }, [bollo, settings.startupSubscription, txRealized.fees, startupStats.feesTot, grandTotal]);
 
   // Mesi mancanti fra il primo e l'ultimo snapshot: un buco nella serie non si
   // vede sul grafico (i punti si toccano lo stesso) ma falsa i rendimenti,
@@ -1793,7 +1940,6 @@ const refreshGoldPrices = useCallback(async () => {
     const snapshotData = buildSnapshot();
     const label = snapshotData.label;
     setSnapSaving(true);
-    setSnapMsg(null);
     try {
       const res  = await apiFetch("/api/snapshot", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1803,14 +1949,13 @@ const refreshGoldPrices = useCallback(async () => {
       if (!json.ok) throw new Error("Risposta non valida");
       const updated = await apiFetch("/api/snapshots").then((r) => r.json());
       if (Array.isArray(updated)) setSnapshots(updated);
-      setSnapMsg({ type: "ok", text: `✓ Snapshot "${label}" salvato` });
+      showToast("ok", `✓ Snapshot "${label}" salvato`);
     } catch (e) {
-      setSnapMsg({ type: "err", text: `Errore: ${e.message}` });
+      showToast("err", `Errore: ${e.message}`);
     } finally {
       setSnapSaving(false);
-      setTimeout(() => setSnapMsg(null), 5000);
     }
-  }, [buildSnapshot]);
+  }, [buildSnapshot, showToast]);
 
   // ---- Auto-save config sul server (debounce 1.5s) ----
   // Ogni modifica (asset, cash, oro, startup) viene persistita in data/config.json.
@@ -1882,13 +2027,12 @@ const refreshGoldPrices = useCallback(async () => {
       }
       const updated = await apiFetch("/api/snapshots").then((r) => r.json());
       if (Array.isArray(updated)) setSnapshots(updated);
-      setSnapMsg({ type: "ok", text: `✓ Importati ${count} snapshot` });
+      showToast("ok", `✓ Importati ${count} snapshot`);
     } catch (e) {
-      setSnapMsg({ type: "err", text: `Errore: ${e.message}` });
+      showToast("err", `Errore: ${e.message}`);
     } finally {
-      setTimeout(() => setSnapMsg(null), 5000);
     }
-  }, []);
+  }, [showToast]);
 
   // ---- Config export/import ----
   const exportConfig = useCallback(() => {
@@ -1906,8 +2050,8 @@ const refreshGoldPrices = useCallback(async () => {
     a.download = `portfolio_config_${new Date().toISOString().slice(0, 10)}.json`;
     a.click();
     URL.revokeObjectURL(a.href);
-    showCfgMsg("ok", "✓ Configurazione esportata");
-  }, [storedAssets, startups, totalCash, assetClasses, storedGoldEtf, physGold, transactions, settings]);
+    showToast("ok", "✓ Configurazione esportata");
+  }, [storedAssets, startups, totalCash, assetClasses, storedGoldEtf, physGold, transactions, settings, showToast]);
 
   const configImportRef = useRef(null);
   const importConfig = useCallback(async (file) => {
@@ -1928,17 +2072,13 @@ const refreshGoldPrices = useCallback(async () => {
       // Gli export senza `settings` (fino alla v4) lasciano le preferenze
       // correnti; le chiavi mancanti in un file più vecchio prendono il default.
       if (config.settings) setSettings({ ...DEFAULT_SETTINGS, ...config.settings });
-      showCfgMsg("ok", `✓ Configurazione importata (${config.exportedAt?.slice(0,10) ?? "?"})`);
+      showToast("ok", `✓ Configurazione importata (${config.exportedAt?.slice(0,10) ?? "?"})`);
     } catch (e) {
-      showCfgMsg("err", `Errore: ${e.message}`);
+      showToast("err", `Errore: ${e.message}`);
     }
     // I setter di useLS sono setter di useState: identità stabile, deps innocue.
-  }, [setAssets, setSU, setCash, setAC, setGoldEtf, setPhysGold, setTx, setSettings]);
+  }, [setAssets, setSU, setCash, setAC, setGoldEtf, setPhysGold, setTx, setSettings, showToast]);
 
-  const showCfgMsg = (type, text) => {
-    setConfigMsg({ type, text });
-    setTimeout(() => setConfigMsg(null), 5000);
-  };
 
   // ---- CRUD ----
   const saveAsset = (a) => setAssets((prev) => {
@@ -1960,7 +2100,6 @@ const refreshGoldPrices = useCallback(async () => {
   }, []);
 
   const saveSnapshotManual = useCallback(async (snap) => {
-    setSnapMsg(null);
     try {
       const res = await apiFetch("/api/snapshot", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -1968,12 +2107,11 @@ const refreshGoldPrices = useCallback(async () => {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await refreshSnapshots();
-      setSnapMsg({ type: "ok", text: `✓ Snapshot "${snap.label}" salvato` });
+      showToast("ok", `✓ Snapshot "${snap.label}" salvato`);
     } catch (e) {
-      setSnapMsg({ type: "err", text: `Errore: ${e.message}` });
+      showToast("err", `Errore: ${e.message}`);
     }
-    setTimeout(() => setSnapMsg(null), 5000);
-  }, [refreshSnapshots]);
+  }, [refreshSnapshots, showToast]);
 
   const deleteSnapshot = useCallback(async (s) => {
     if (!window.confirm(`Eliminare lo snapshot "${s.label}"? Lo storico non è recuperabile.`)) return;
@@ -1981,11 +2119,13 @@ const refreshGoldPrices = useCallback(async () => {
       const res = await apiFetch(`/api/snapshot/${s.year}/${s.month}`, { method: "DELETE" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await refreshSnapshots();
+      // Mancava la conferma: l'unica azione distruttiva dello storico si
+      // concludeva in silenzio, e la riga sparita era l'unico riscontro.
+      showToast("ok", `✓ Snapshot "${s.label}" eliminato`);
     } catch (e) {
-      setSnapMsg({ type: "err", text: `Errore: ${e.message}` });
-      setTimeout(() => setSnapMsg(null), 5000);
+      showToast("err", `Errore: ${e.message}`);
     }
-  }, [refreshSnapshots]);
+  }, [refreshSnapshots, showToast]);
 
   // Il primo movimento di un asset che aveva la posizione inserita a mano deve
   // aggiungersi a quella posizione, non sostituirla: si registra prima la riga
@@ -2033,7 +2173,7 @@ const refreshGoldPrices = useCallback(async () => {
         quantity: r2(x.amount / x.price), price: x.price, fee: 0,
         notes: "Ribilanciamento",
       }))]);
-    setTab("transactions");
+    goTab("transactions");
   };
 
   // Punto di partenza del registro: una riga d'acquisto per ogni posizione già
@@ -2076,6 +2216,35 @@ const refreshGoldPrices = useCallback(async () => {
     ? TABS.filter((t) => t.id !== "settings" && t.id !== "transactions")
     : TABS;
 
+  // ---- Routing per tab sull'hash ----
+  // La tab era solo stato React: nessun link diretto, il tasto Indietro usciva
+  // dall'app e un link condiviso atterrava sempre su Overview. L'hash basta e
+  // non richiede un router: il path resta libero per /p/<token>, che AuthGate
+  // legge prima di montare App.
+  useEffect(() => {
+    const fromHash = () => {
+      const id = window.location.hash.replace(/^#\/?/, "");
+      return visibleTabs.some((t) => t.id === id) ? id : null;
+    };
+    const sync = () => setTab(fromHash() ?? "overview");
+    sync();                                  // hash iniziale (deep link)
+    window.addEventListener("hashchange", sync);
+    return () => window.removeEventListener("hashchange", sync);
+  // visibleTabs cambia solo con readOnly, che è fisso per tutta la vita di App.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const goTab = useCallback((id) => {
+    // Lo stato si aggiorna subito invece di aspettare il giro di `hashchange`:
+    // quell'evento è asincrono, e far dipendere il render da lui rendeva il
+    // cambio di tab visibile solo al tick successivo.
+    setTab(id);
+    // Assegnare l'hash aggiunge una voce di cronologia, così Indietro torna
+    // alla tab precedente invece di uscire dall'app. L'hashchange che ne segue
+    // rimette lo stesso valore: è un no-op.
+    window.location.hash = `#/${id}`;
+  }, []);
+
   // ====================== TAB: OVERVIEW ======================
   const renderOverview = () => (
     <div className="tab-content">
@@ -2088,7 +2257,7 @@ const refreshGoldPrices = useCallback(async () => {
             Puoi aggiungere ETF, azioni, startup, oro e liquidità.
           </p>
           {!readOnly && (
-            <button className="btn btn-primary" onClick={() => { setTab("portfolio"); setAssetModal({}); }} style={{ fontSize: 15, padding: "10px 24px" }}>
+            <button className="btn btn-primary" onClick={() => { goTab("portfolio"); setAssetModal({}); }} style={{ fontSize: 15, padding: "10px 24px" }}>
               <Plus size={16}/> Inizia ad aggiungere asset
             </button>
           )}
@@ -2208,11 +2377,6 @@ const refreshGoldPrices = useCallback(async () => {
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
                 <h3 className="section-title" style={{ margin: 0 }}><LineChartIcon size={16}/> Prezzi asset — base 100</h3>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                  {snapshotMsg && (
-                    <span style={{ fontSize: 12, color: snapshotMsg.type === "ok" ? "var(--green)" : "var(--red)" }}>
-                      {snapshotMsg.text}
-                    </span>
-                  )}
                   {!readOnly && (
                     <>
                       <input ref={importSnapshotsRef} type="file" accept=".json" style={{ display: "none" }}
@@ -2331,6 +2495,10 @@ const refreshGoldPrices = useCallback(async () => {
   );
 
   // ====================== TAB: PORTFOLIO ======================
+  // Le colonne del registro compaiono solo se il registro è in uso: su un
+  // portafoglio a posizioni inserite a mano sarebbero due colonne di trattini.
+  const hasTxCols = Object.keys(holdingByKey).length > 0;
+
   const renderPortfolio = () => (
     <div className="tab-content">
       {/* Liquidità */}
@@ -2406,6 +2574,12 @@ const refreshGoldPrices = useCallback(async () => {
                     <th className="num">P. Acquisto</th><th className="num">P. Attuale</th>
                     <th className="num">Valore</th><th className="num">Perf €</th>
                     <th className="num">Perf %</th>
+                    {hasTxCols && (
+                      <>
+                        <th className="num" title="Utile o perdita già incassati dalle vendite di questo asset, al netto delle commissioni">Realizzato</th>
+                        <th className="num" title="Dividendi e cedole incassati da questo asset, al netto di ritenute e spese">Dividendi</th>
+                      </>
+                    )}
                     <th className="num" title="Peso % sul sotto-portafoglio ETF (escluso oro) — somma 100%">Peso</th>
                     <th className="num">Target</th><th>Classe</th><th></th>
                   </tr>
@@ -2434,6 +2608,19 @@ const refreshGoldPrices = useCallback(async () => {
                           {a.lastPrice && a.costBasis ? `${perfE >= 0 ? "+" : ""}${fmt(perfE)}` : "—"}
                         </td>
                         <td className="num">{a.lastPrice && a.costBasis ? <Badge value={perfP}/> : "—"}</td>
+                        {hasTxCols && (() => {
+                          const h = holdingByKey[txKey(a)];
+                          return (
+                            <>
+                              <td className={`num mono ${h?.realized >= 0 ? "pos-text" : "neg-text"}`}>
+                                {h?.realized ? fmt(h.realized) : <span className="muted">—</span>}
+                              </td>
+                              <td className="num mono">
+                                {h?.income ? fmt(h.income) : <span className="muted">—</span>}
+                              </td>
+                            </>
+                          );
+                        })()}
                         <td className="num mono" title="Peso % sul sotto-portafoglio ETF">
                           {weight.toFixed(1)}%
                         </td>
@@ -2466,7 +2653,7 @@ const refreshGoldPrices = useCallback(async () => {
                     <tr className="total-row" style={{ opacity: 0.75 }}>
                       <td colSpan={5}>{goldEtf.name} <span className="muted">(sezione Oro &amp; Bitcoin)</span></td>
                       <td className="num mono">{goldEtfValue > 0 ? fmt(goldEtfValue) : "—"}</td>
-                      <td colSpan={2}></td>
+                      <td colSpan={hasTxCols ? 4 : 2}></td>
                       <td className="num mono">{goldPct != null ? `${goldPct.toFixed(1)}%` : "—"}</td>
                       <td className="num">
                         <span className="target-badge ok">{goldEtf.targetWeight || 0}%</span>
@@ -2477,7 +2664,7 @@ const refreshGoldPrices = useCallback(async () => {
                   <tr className="total-row">
                     <td colSpan={5}><strong>Totale</strong></td>
                     <td className="num mono"><strong>{fmt(etfSubTotal)}</strong></td>
-                    <td colSpan={2}></td>
+                    <td colSpan={hasTxCols ? 4 : 2}></td>
                     <td className="num mono"><strong>100,0%</strong></td>
                     <td className="num">
                       <span className={`target-badge ${etfTargetSum > 100 ? "over" : "ok"}`}
@@ -2875,7 +3062,35 @@ const refreshGoldPrices = useCallback(async () => {
                   {startupStats.roiOverallPct != null ? <Badge value={startupStats.roiOverallPct}/> : <span className="muted mono">—</span>}
                 </span>
               </div>
+              {/* Le due letture che il ROI da solo non dà su posizioni
+                  illiquide: quanto rende all'anno e da quanto è fermo. */}
+              <div className="ss-item ss-item--strong"
+                title="Rendimento annualizzato dei flussi: tiene conto di quando è entrato e uscito ogni euro. Abbonamento escluso, è un costo comune.">
+                <span className="ss-label">IRR</span>
+                <span className="ss-value">
+                  {suIrr != null ? <Badge value={r2(suIrr * 100)}/> : <span className="muted mono">—</span>}
+                </span>
+              </div>
+              <div className="ss-item"
+                title={suHoldings.oldest
+                  ? `La più vecchia ancora aperta è ${suHoldings.oldest.name}, da ${suHoldings.oldest.years} anni`
+                  : "Serve la data d'investimento"}>
+                <span className="ss-label">Durata media</span>
+                <span className="ss-value mono">
+                  {suHoldings.avgYears != null
+                    ? `${suHoldings.avgYears.toFixed(1)} anni`
+                    : <span className="muted">—</span>}
+                </span>
+              </div>
             </div>
+            {suHoldings.missingDate > 0 && (
+              <p className="hint-text" style={{ marginTop: 8 }}>
+                {suHoldings.missingDate === startups.length
+                  ? "Nessuna startup ha la data d'investimento: senza, non si possono calcolare IRR e durata."
+                  : `${suHoldings.missingDate} startup su ${startups.length} non hanno la data d'investimento e restano fuori da IRR e durata.`}
+                {" "}Si aggiunge dal pulsante di modifica della riga.
+              </p>
+            )}
             <p className="hint-text" style={{ marginTop: 10 }}>
               {startupStats.allClosed
                 ? `🏁 Bilancio finale: a fronte di ${fmt(startupStats.totalOutlay)} di esborso complessivo (capitale + commissioni + abbonamento) hai recuperato ${fmt(startupStats.totalValue)}, con un risultato di ${fmt(startupStats.pnlOverall)}.`
@@ -2981,11 +3196,6 @@ const refreshGoldPrices = useCallback(async () => {
             </p>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            {configMsg && (
-              <span style={{ fontSize: 12, color: configMsg.type === "ok" ? "var(--green)" : "var(--red)" }}>
-                {configMsg.text}
-              </span>
-            )}
             <input ref={configImportRef} type="file" accept=".json" style={{ display: "none" }}
               onChange={(e) => { importConfig(e.target.files[0]); e.target.value = ""; }}/>
             <button className="btn btn-ghost" onClick={() => configImportRef.current?.click()}>
@@ -3093,6 +3303,24 @@ const refreshGoldPrices = useCallback(async () => {
         </div>
       ) : (
         <>
+          {/* Finestra temporale: vale per tutte le analisi sotto. */}
+          <div className="section-card period-bar">
+            <span className="section-title" style={{ margin: 0 }}>Periodo</span>
+            <div className="period-tabs" role="group" aria-label="Periodo delle analisi">
+              {PERIODS.map((p) => (
+                <button key={p.id} className={`period-btn ${period === p.id ? "active" : ""}`}
+                  aria-pressed={period === p.id} onClick={() => setPeriod(p.id)}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <span className="muted" style={{ fontSize: 12, marginLeft: "auto" }}>
+              {anaSnaps.length > 1
+                ? <>{anaSnaps.length} mesi · da {anaSnaps[0].label} a {anaSnaps.at(-1).label}</>
+                : "Storico insufficiente per questo periodo"}
+            </span>
+          </div>
+
           <div className="section-card">
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
               <h3 className="section-title" style={{ margin: 0 }}><Shield size={16}/> Metriche di rischio</h3>
@@ -3100,7 +3328,12 @@ const refreshGoldPrices = useCallback(async () => {
                 {riskObs} osservazioni — {riskMetrics.quality}
               </span>
             </div>
-            <div className="grid-5" style={{ marginTop: 12 }}>
+            <div className="grid-3 risk-grid" style={{ marginTop: 12 }}>
+              <RiskCard label={period === "all" ? "Rendimento" : `Rendimento ${PERIODS.find((p) => p.id === period).label}`}
+                value={periodRet}
+                fmtFn={(v) => fmtPct(v * 100)}
+                tooltip="Rendimento composto del periodo selezionato, al netto dei versamenti. Non annualizzato: su una finestra corta è questo il numero che dice come sta andando."
+                quality={periodRet > 0 ? "good" : "bad"}/>
               <RiskCard label="CAGR"          value={riskMetrics.cagr}
                 fmtFn={(v) => fmtPct(v * 100)} tooltip="Tasso di crescita annuo composto, al netto dei versamenti"
                 quality={riskMetrics.cagr > 0.05 ? "good" : "bad"}/>
@@ -3122,6 +3355,31 @@ const refreshGoldPrices = useCallback(async () => {
                 ? `⚠ ${riskObs} rendimenti mensili disponibili: volatilità e rapporti sono indicativi finché non se ne accumulano ${OBS_RELIABLE}. Sotto le 12 osservazioni non vengono proprio calcolati — un numero costruito su pochi mesi dipende da quali mesi sono capitati nel campione, non dal portafoglio.`
                 : `Campione di ${riskObs} rendimenti mensili. Tasso privo di rischio: ${settings.riskFree ?? 3}% (modificabile in Impostazioni).`}
             </p>
+            {concentration.top1 != null && (
+              <>
+                <div className="summary-strip" style={{ marginTop: 4 }}>
+                  <div className="ss-item">
+                    <span className="ss-label">Posizione maggiore</span>
+                    <span className="ss-value mono">{concentration.top1.toFixed(1)}%</span>
+                  </div>
+                  <div className="ss-item">
+                    <span className="ss-label">Prime tre</span>
+                    <span className="ss-value mono">{concentration.top3.toFixed(1)}%</span>
+                  </div>
+                  <div className="ss-item">
+                    <span className="ss-label">Posizioni quotate</span>
+                    <span className="ss-value mono">{concentration.count}</span>
+                  </div>
+                </div>
+                <p className="hint-text">
+                  <strong>{concentration.top1Name}</strong> da sola vale il{" "}
+                  {concentration.top1.toFixed(1)}% del patrimonio. È la lettura che la torta per
+                  classe non dà: più ETF azionari globali sono più fette ma un&apos;unica
+                  scommessa, e il peso di un singolo strumento è anche rischio emittente.
+                  Liquidità, oro fisico e startup sono nel denominatore e quindi diluiscono.
+                </p>
+              </>
+            )}
           </div>
 
           {transactions.length > 0 && (
@@ -3145,6 +3403,22 @@ const refreshGoldPrices = useCallback(async () => {
                 Calcolate sulle sole posizioni con movimenti registrati.
                 {yieldOnCost != null && <> Rendimento da dividendi sul costo (<strong>yield on cost</strong>): <strong>{fmtPct(yieldOnCost)}</strong>.</>}
               </p>
+              {/* Le due misure esistevano già in due card diverse senza essere
+                  mai confrontate: la loro differenza è l'unico numero che dice
+                  se il *quando* si è comprato ha aiutato o meno. */}
+              {txXirr != null && riskMetrics.cagr != null && (
+                <p className="hint-text">
+                  <strong>XIRR {fmtPct(txXirr * 100)}</strong> contro un{" "}
+                  <strong>CAGR del patrimonio {fmtPct(riskMetrics.cagr * 100)}</strong>:{" "}
+                  {Math.abs(txXirr - riskMetrics.cagr) < 0.005
+                    ? "le due misure coincidono, il momento dei versamenti non ha spostato il risultato."
+                    : txXirr > riskMetrics.cagr
+                      ? `${fmtPct((txXirr - riskMetrics.cagr) * 100)} a favore dell'investitore — i versamenti sono caduti in momenti mediamente favorevoli.`
+                      : `${fmtPct((txXirr - riskMetrics.cagr) * 100)} a sfavore — i versamenti sono caduti in momenti mediamente sfavorevoli.`}
+                  {" "}Il CAGR misura il portafoglio, l&apos;XIRR misura chi lo alimenta:
+                  la differenza è il contributo del <em>quando</em>.
+                </p>
+              )}
             </div>
           )}
 
@@ -3327,6 +3601,50 @@ const refreshGoldPrices = useCallback(async () => {
               <p className="hint-text">
                 Rendimento mensile al netto dei versamenti. La colonna finale compone i mesi
                 disponibili dell'anno: se l'anno è incompleto, è un parziale.
+              </p>
+            </div>
+          )}
+
+          {/* ---- Costi ---- */}
+          {(costs.recurringYear > 0 || costs.paidToDate > 0) && (
+            <div className="section-card">
+              <h3 className="section-title"><Wallet size={16}/> Costi</h3>
+              <div className="summary-strip" style={{ marginBottom: 12 }}>
+                <div className="ss-item ss-item--strong">
+                  <span className="ss-label">Ricorrenti / anno</span>
+                  <span className="ss-value mono neg-text">{fmt(costs.recurringYear)}</span>
+                </div>
+                <div className="ss-item ss-item--strong"
+                  title="Quanto i costi ricorrenti pesano ogni anno sul patrimonio: è la quota di rendimento che se ne va prima di qualunque risultato di mercato.">
+                  <span className="ss-label">Incidenza annua</span>
+                  <span className="ss-value mono">
+                    {costs.recurringPct != null ? `${costs.recurringPct.toFixed(2)}%` : "—"}
+                  </span>
+                </div>
+                <div className="ss-item">
+                  <span className="ss-label">Bollo titoli</span>
+                  <span className="ss-value mono">{fmt(costs.bollo)}</span>
+                </div>
+                <div className="ss-item">
+                  <span className="ss-label">Abbonamento startup</span>
+                  <span className="ss-value mono">{fmt(costs.subscription)}</span>
+                </div>
+                <div className="ss-item">
+                  <span className="ss-label">Commissioni movimenti</span>
+                  <span className="ss-value mono">{costs.txFees ? fmt(costs.txFees) : "—"}</span>
+                </div>
+                <div className="ss-item">
+                  <span className="ss-label">Commissioni startup</span>
+                  <span className="ss-value mono">{costs.startupFees ? fmt(costs.startupFees) : "—"}</span>
+                </div>
+              </div>
+              <p className="hint-text">
+                Le prime due voci sono <strong>ricorrenti</strong>: si ripagano ogni anno, e
+                l'incidenza dice quanto rendimento va via prima ancora di guardare il mercato.
+                Le commissioni sono invece quanto è stato pagato <strong>finora</strong>
+                {" "}({fmt(costs.paidToDate)} in tutto): sommarle alle prime darebbe un numero
+                senza significato, perché coprono periodi diversi.
+                {!transactions.length && " Le commissioni sui movimenti compaiono quando il registro è in uso."}
               </p>
             </div>
           )}
@@ -3902,16 +4220,20 @@ const refreshGoldPrices = useCallback(async () => {
           <div>
             <h1 className="app-title">Portfolio Tracker</h1>
             <p className="app-subtitle">
-              {readOnly
-                ? <><Eye size={12}/> Vista condivisa · sola lettura</>
-                : <><Info size={12}/> Aggiornamento automatico ogni 15 min</>}
+              {/* La parte informativa sparisce su mobile (.subtitle-static),
+                  lo stato di salvataggio qui sotto no. */}
+              <span className="subtitle-static">
+                {readOnly
+                  ? <><Eye size={12}/> Vista condivisa · sola lettura</>
+                  : <><Info size={12}/> Aggiornamento automatico ogni 15 min</>}
+              </span>
               {!readOnly && lastSaved && !saveErr && (
                 <span style={{ color: "var(--green)" }}>
-                  · Salvato {lastSaved.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })}
+                  Salvato {lastSaved.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })}
                 </span>
               )}
               {!readOnly && saveErr && (
-                <span style={{ color: "var(--red)" }}>· ⚠ Non salvato: {saveErr}</span>
+                <span style={{ color: "var(--red)" }}>⚠ Non salvato: {saveErr}</span>
               )}
               {isLoading && (
                 <span className="loading-dot-row">
@@ -3972,7 +4294,7 @@ const refreshGoldPrices = useCallback(async () => {
         {visibleTabs.map((t) => {
           const Icon = t.icon;
           return (
-            <button key={t.id} className={`tab-btn ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>
+            <button key={t.id} className={`tab-btn ${tab === t.id ? "active" : ""}`} onClick={() => goTab(t.id)}>
               <Icon size={15}/> {t.label}
             </button>
           );
@@ -3996,13 +4318,26 @@ const refreshGoldPrices = useCallback(async () => {
             const Icon = t.icon;
             return (
               <button key={t.id} className={`bottom-nav-btn ${tab === t.id ? "active" : ""}`}
-                onClick={() => { setTab(t.id); window.scrollTo(0, 0); }} aria-label={t.label}>
+                onClick={() => { goTab(t.id); window.scrollTo(0, 0); }} aria-label={t.label}>
                 <Icon size={19}/> <span>{t.short}</span>
               </button>
             );
           })}
         </div>
       </nav>
+
+      {/* Feedback delle azioni: unico host, così il messaggio si vede da
+          qualunque tab sia partita l'azione. `role=status` lo fa annunciare
+          agli screen reader senza rubare il fuoco. */}
+      {toast && (
+        <div className={`toast toast-${toast.type}`} role="status" aria-live="polite">
+          {toast.type === "ok" ? <CheckCircle size={15}/> : <AlertTriangle size={15}/>}
+          <span>{toast.text}</span>
+          <button className="toast-close" onClick={() => setToast(null)} aria-label="Chiudi">
+            <X size={14}/>
+          </button>
+        </div>
+      )}
 
       {/* Modali */}
       {assetModal !== null && (

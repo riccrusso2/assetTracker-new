@@ -2,7 +2,9 @@ import {
   r2, isTotalTargetAsset, calcRebalancing, calcRebalancingTwoLevel,
   calcGrowthAttribution, calcStartupMetrics, calcStartupPortfolio,
   calcDrift, driftThreshold, DRIFT_ALERT_PP,
+  startupCashFlows, startupHoldings, calcConcentration,
 } from "./rebalance";
+import { xirr } from "./transactions";
 
 test("Bitcoin (Crypto) e ETF oro hanno per default il target sul patrimonio totale", () => {
   expect(isTotalTargetAsset({ assetClass: "Crypto" })).toBe(true);
@@ -322,5 +324,106 @@ describe("calcDrift", () => {
     expect(driftThreshold(0)).toBe(DRIFT_ALERT_PP);
     expect(driftThreshold(undefined)).toBe(DRIFT_ALERT_PP);
     expect(driftThreshold(2)).toBe(2);
+  });
+});
+
+// ====================== durata e IRR del book startup ======================
+
+describe("startupCashFlows / startupHoldings", () => {
+  const ASOF = "2026-01-01";
+
+  test("i flussi sono l'esborso all'ingresso e l'incasso all'uscita", () => {
+    const flows = startupCashFlows([
+      { id: "a", name: "Exit", invested: 300, fee: 24, status: "exit",
+        exitAmount: 900, date: "2022-01-01", exitDate: "2025-01-01" },
+    ], ASOF);
+    expect(flows).toEqual([
+      { date: "2022-01-01", amount: -324 },
+      { date: "2025-01-01", amount: 900 },
+    ]);
+    // 324 → 900 in tre anni ≈ +40,6% annuo.
+    expect(xirr(flows) * 100).toBeCloseTo(40.6, 0);
+  });
+
+  test("una attiva vale alla data di riferimento, una fallita non incassa nulla", () => {
+    const attiva = startupCashFlows(
+      [{ id: "a", name: "A", invested: 100, fee: 0, status: "active", date: "2025-01-01" }], ASOF);
+    expect(attiva).toEqual([
+      { date: "2025-01-01", amount: -100 },
+      { date: ASOF, amount: 100 },
+    ]);
+    const fallita = startupCashFlows(
+      [{ id: "b", name: "B", invested: 100, fee: 0, status: "failed", date: "2025-01-01" }], ASOF);
+    // Solo l'uscita: xirr su un flusso di solo segno negativo restituisce null,
+    // ed è corretto — non esiste un tasso che spieghi una perdita totale.
+    expect(fallita).toEqual([{ date: "2025-01-01", amount: -100 }]);
+    expect(xirr(fallita)).toBeNull();
+  });
+
+  test("le posizioni senza data restano fuori e vengono contate", () => {
+    const su = [
+      { id: "a", name: "Con data", invested: 300, fee: 24, date: "2024-01-01" },
+      { id: "b", name: "Senza data", invested: 300, fee: 24 },
+    ];
+    expect(startupCashFlows(su, ASOF)).toHaveLength(2);   // solo quelle di "a"
+    const h = startupHoldings(su, ASOF);
+    expect(h.withDate).toBe(1);
+    expect(h.missingDate).toBe(1);
+  });
+
+  test("la durata media è ponderata per capitale, non per numero di righe", () => {
+    const h = startupHoldings([
+      { id: "a", name: "Piccola", invested: 100, fee: 0, date: "2024-01-01" },  // 2 anni
+      { id: "b", name: "Grande",  invested: 900, fee: 0, date: "2025-01-01" },  // 1 anno
+    ], "2026-01-01");
+    // Media semplice = 1,5. Ponderata = (2×100 + 1×900)/1000 = 1,1.
+    expect(h.avgYears).toBeCloseTo(1.1, 1);
+  });
+
+  test("la più vecchia ancora aperta è quella che dice da quanto il capitale è fermo", () => {
+    const h = startupHoldings([
+      { id: "a", name: "Vecchia aperta", invested: 300, fee: 0, date: "2020-01-01" },
+      { id: "b", name: "Vecchissima chiusa", invested: 300, fee: 0, status: "exit",
+        exitAmount: 100, date: "2015-01-01", exitDate: "2019-01-01" },
+    ], "2026-01-01");
+    expect(h.oldest.name).toBe("Vecchia aperta");
+    expect(h.oldest.years).toBeCloseTo(6, 0);
+  });
+
+  test("book senza date: nessuna durata invece di un numero inventato", () => {
+    const h = startupHoldings([{ id: "a", name: "X", invested: 300, fee: 0 }], ASOF);
+    expect(h.avgYears).toBeNull();
+    expect(h.missingDate).toBe(1);
+  });
+});
+
+// ====================== concentrazione ======================
+
+describe("calcConcentration", () => {
+  test("misura il peso della prima e delle prime tre posizioni sul patrimonio", () => {
+    // Il portafoglio reale: un ETF da solo vale più della metà del quotato.
+    const c = calcConcentration([
+      { name: "FTSE All-World", value: 15_874 },
+      { name: "MSCI World",     value: 4_023 },
+      { name: "EM IMI",         value: 2_128 },
+      { name: "Quality",        value: 2_441 },
+    ], 24_466);
+    expect(c.top1).toBeCloseTo(64.9, 1);
+    expect(c.top1Name).toBe("FTSE All-World");
+    expect(c.top3).toBeCloseTo(91.3, 1);   // le tre maggiori, non le prime tre in ordine di lista
+    expect(c.count).toBe(4);
+  });
+
+  test("la base è il patrimonio: la liquidità diluisce la concentrazione", () => {
+    const pos = [{ name: "Unico", value: 5_000 }];
+    expect(calcConcentration(pos, 5_000).top1).toBe(100);
+    expect(calcConcentration(pos, 10_000).top1).toBe(50);
+  });
+
+  test("senza posizioni o senza patrimonio non inventa un numero", () => {
+    expect(calcConcentration([], 1000).top1).toBeNull();
+    expect(calcConcentration([{ name: "a", value: 10 }], 0).top1).toBeNull();
+    // Le posizioni a zero o non numeriche non contano.
+    expect(calcConcentration([{ name: "a", value: 0 }, { name: "b" }], 100).top1).toBeNull();
   });
 });

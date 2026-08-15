@@ -4,6 +4,7 @@ import {
   contributionByAsset, monthlyReturnsGrid, benchmarkSeries,
   MIN_OBS_RATIO,
   syntheticRows, isSynthetic, syntheticLabel, SYNTHETIC_RESIDUAL,
+  sliceSnapshots, periodReturn,
 } from "./metrics";
 import { snapKey } from "./rebalance";
 
@@ -348,4 +349,59 @@ test("la composizione nel tempo copre tutto il patrimonio, anche sugli snapshot 
   expect(a[SYNTHETIC_RESIDUAL]).toBe(50);
   expect(b.etf).toBe(50);
   expect(b[snapKey({ id: "__cash__", name: "Liquidità" })]).toBe(50);
+});
+
+// ====================== finestra temporale ======================
+
+describe("sliceSnapshots / periodReturn", () => {
+  // Gen 2024 → Ago 2026, un punto al mese.
+  const serie = [];
+  for (let y = 2024; y <= 2026; y++) {
+    for (let m = 1; m <= 12; m++) {
+      if (y === 2026 && m > 8) break;
+      serie.push(snap(`${m}/${y}`, y, m, 1000, [pos("etf", 100, 10)]));
+    }
+  }
+  const NOW = new Date(2026, 7, 15);   // 15 agosto 2026
+
+  test("«Tutto» non taglia niente", () => {
+    expect(sliceSnapshots(serie, "all", NOW)).toBe(serie);
+    expect(sliceSnapshots(serie, undefined, NOW)).toBe(serie);
+  });
+
+  test("YTD parte da gennaio dell'anno corrente e tiene il mese base", () => {
+    const s = sliceSnapshots(serie, "ytd", NOW);
+    // Gen–Ago 2026 sono 8 mesi, più dicembre 2025 come punto di partenza.
+    expect(s).toHaveLength(9);
+    expect(s[0]).toMatchObject({ year: 2025, month: 12 });
+    expect(s.at(-1)).toMatchObject({ year: 2026, month: 8 });
+  });
+
+  test("1 anno copre 12 mesi di rendimento", () => {
+    const s = sliceSnapshots(serie, "1y", NOW);
+    expect(s).toHaveLength(13);            // 12 rendimenti + base
+    expect(s[0]).toMatchObject({ year: 2025, month: 8 });
+    expect(calcReturns(buildHistory(s))).toHaveLength(12);
+  });
+
+  test("3 anni su uno storico più corto restituisce quello che c'è", () => {
+    const s = sliceSnapshots(serie, "3y", NOW);
+    expect(s).toEqual(serie);              // il taglio cade prima del primo mese
+  });
+
+  test("periodo interamente successivo allo storico: nessun punto, non un errore", () => {
+    const vecchi = [snap("1/2010", 2010, 1, 1000, [pos("etf", 100, 10)])];
+    expect(sliceSnapshots(vecchi, "1y", NOW)).toEqual([]);
+    expect(periodReturn([])).toBeNull();
+  });
+
+  test("il rendimento di periodo compone i mesi al netto dei versamenti", () => {
+    // +10%, poi +10% con 100 di versamento: composto = 21%.
+    const s = [
+      snap("M0", 2026, 1, 1000, [pos("etf", 100, 10)]),
+      snap("M1", 2026, 2, 1100, [pos("etf", 110, 10)]),
+      snap("M2", 2026, 3, 1310, [pos("etf", 121, 10), ...syntheticRows({ totalCash: 100 })]),
+    ];
+    expect(periodReturn(s)).toBeCloseTo(0.21, 6);
+  });
 });

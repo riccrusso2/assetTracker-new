@@ -152,6 +152,28 @@ export const calcDrift = (positions = []) => {
 // il criterio, altrimenti il default.
 export const driftThreshold = (band) => (band > 0 ? band : DRIFT_ALERT_PP);
 
+// ====================== CONCENTRAZIONE ======================
+// Quanto patrimonio dipende da una sola posizione. È la domanda che l'asset
+// allocation per classe non risponde: cinque ETF azionari globali sono cinque
+// righe nella torta ma un'unica scommessa, e un 50% su un singolo strumento è
+// un rischio emittente che il peso per classe non mostra.
+// `positions`: [{ name, value }]. La base è il patrimonio totale, non la somma
+// delle posizioni: la liquidità diluisce la concentrazione ed è corretto che lo
+// faccia.
+export const calcConcentration = (positions = [], total = 0) => {
+  const rows = (positions || [])
+    .filter((p) => p && Number.isFinite(p.value) && p.value > 0)
+    .sort((a, b) => b.value - a.value);
+  if (!rows.length || !(total > 0)) return { top1: null, top3: null, top1Name: null, count: 0 };
+  const pct = (v) => r2((v / total) * 100);
+  return {
+    top1: pct(rows[0].value),
+    top3: pct(rows.slice(0, 3).reduce((a, p) => a + p.value, 0)),
+    top1Name: rows[0].name,
+    count: rows.length,
+  };
+};
+
 // Attribuzione crescita mese su mese (solo asset quotati negli snapshot):
 // versamenti ≈ Σ Δquantità × prezzo del mese; mercato = Δvalore − versamenti.
 // ponytail: approssima gli acquisti al prezzo di fine mese — per precisione
@@ -249,5 +271,63 @@ export const calcStartupPortfolio = (startups, subscription = 0) => {
     pnlRealizedNet,
     roiRealizedNetPct: realizedBase > 0 ? r2((pnlRealizedNet / realizedBase) * 100) : null,
     allClosed: rows.length > 0 && active.length === 0,
+  };
+};
+
+// ====================== DURATA E IRR DEL BOOK STARTUP ======================
+// Un investimento in equity crowdfunding si valuta sull'orizzonte, non sul solo
+// ROI: 300 € che tornano 400 € valgono molto diversamente dopo due o dopo otto
+// anni. Serviva solo la data, che il modello non aveva.
+//
+// L'abbonamento alla piattaforma resta fuori: è un costo comune e ricorrente,
+// non attribuibile a una singola posizione, e senza sapere per quanti anni è
+// stato pagato entrerebbe nel calcolo come una cifra arbitraria. Compare nel
+// riepilogo costi.
+const DAY_MS = 864e5;
+
+// Flussi pronti per xirr(): esborso alla data d'ingresso, incasso alla data
+// d'uscita (o valore odierno per le attive). Le posizioni senza data restano
+// fuori — un flusso senza data non è collocabile nel tempo.
+export const startupCashFlows = (startups, asOf) => {
+  const flows = [];
+  for (const s of (startups || []).map(calcStartupMetrics)) {
+    if (!s.date) continue;
+    if (s.totalCost > 0) flows.push({ date: s.date, amount: r2(-s.totalCost) });
+    if (s.closed) {
+      // Una fallita non produce incasso: il flusso in uscita c'è comunque,
+      // altrimenti xirr non vedrebbe mai la perdita.
+      const amount = r2(s.recovered || 0);
+      if (amount > 0) flows.push({ date: s.exitDate || asOf, amount });
+    } else if (s.value > 0) {
+      flows.push({ date: asOf, amount: r2(s.value) });
+    }
+  }
+  return flows.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+};
+
+// Quanto capitale è fermo da quanto tempo. `asOf` è la data di riferimento per
+// le posizioni ancora aperte.
+export const startupHoldings = (startups, asOf) => {
+  const rows = (startups || []).map(calcStartupMetrics).filter((s) => s.date);
+  if (!rows.length) return { withDate: 0, missingDate: (startups || []).length, avgYears: null, oldest: null };
+  const end = (s) => (s.closed ? (s.exitDate || asOf) : asOf);
+  const years = (s) => (new Date(end(s)) - new Date(s.date)) / (365.25 * DAY_MS);
+  const valid = rows.filter((s) => Number.isFinite(years(s)) && years(s) >= 0);
+  if (!valid.length) return { withDate: rows.length, missingDate: 0, avgYears: null, oldest: null };
+  // Media ponderata per capitale: due anni su 300 € e otto su 3.000 € non
+  // pesano uguale nel dire "da quanto è immobilizzato il mio denaro".
+  const cost = valid.reduce((a, s) => a + s.totalCost, 0);
+  const avgYears = cost > 0
+    ? r2(valid.reduce((a, s) => a + years(s) * s.totalCost, 0) / cost)
+    : null;
+  const openOnes = valid.filter((s) => !s.closed);
+  const oldest = openOnes.length
+    ? openOnes.reduce((a, b) => (years(b) > years(a) ? b : a))
+    : null;
+  return {
+    withDate: valid.length,
+    missingDate: (startups || []).length - valid.length,
+    avgYears,
+    oldest: oldest ? { name: oldest.name, years: r2(years(oldest)) } : null,
   };
 };

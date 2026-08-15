@@ -194,3 +194,75 @@ test("la vista condivisa non mostra la tab Movimenti", async () => {
 
   expect(screen.queryByRole("button", { name: /Movim/i })).not.toBeInTheDocument();
 });
+
+// ====================== routing e feedback ======================
+
+test("l'hash apre direttamente la tab: il link condiviso non atterra più su Overview", async () => {
+  window.location.hash = "#/analysis";
+  render(<App session={{ user: { id: "u1", email: "a@b.c" } }} />);
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledWith("/api/config"));
+
+  // Contenuto esclusivo della tab Analisi.
+  expect(await screen.findByText(/Metriche di rischio/i)).toBeInTheDocument();
+  window.location.hash = "";
+});
+
+test("cambiare tab scrive l'hash, così la pagina si può ricaricare e linkare", async () => {
+  window.location.hash = "";
+  render(<App session={{ user: { id: "u1", email: "a@b.c" } }} />);
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledWith("/api/config"));
+
+  await openTab("Ribilanciamento");
+  expect(window.location.hash).toBe("#/rebalancing");
+  window.location.hash = "";
+});
+
+// Regressione: il messaggio degli snapshot era reso solo nell'header di un
+// grafico in Overview, ma eliminare uno snapshot si fa dalla tab Analisi.
+// L'esito dell'azione — riuscita o fallita — non arrivava mai a schermo.
+test("il feedback di un'azione fatta in Analisi si vede in Analisi", async () => {
+  window.location.hash = "";
+  jest.spyOn(window, "confirm").mockReturnValue(true);
+  render(<App session={{ user: { id: "u1", email: "a@b.c" } }} />);
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledWith("/api/config"));
+
+  await openTab("Analisi");
+  const del = (await screen.findAllByTitle(/Elimina/i))[0];
+  await userEvent.click(del);
+
+  const toast = await screen.findByRole("status");
+  expect(toast).toHaveTextContent(/snapshot/i);
+  window.confirm.mockRestore();
+  window.location.hash = "";
+});
+
+test("il selettore di periodo restringe le analisi allo storico scelto", async () => {
+  window.location.hash = "";
+  render(<App session={{ user: { id: "u1", email: "a@b.c" } }} />);
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledWith("/api/config"));
+  await openTab("Analisi");
+
+  // Di default sono compresi tutti e 4 gli snapshot (Gen, Feb, Apr, Mag 2026).
+  expect(await screen.findByText(/4 mesi · da Gen 2026 a Mag 2026/)).toBeInTheDocument();
+
+  // YTD su uno storico tutto dentro l'anno corrente non cambia nulla…
+  await userEvent.click(screen.getByRole("button", { name: "YTD" }));
+  expect(await screen.findByText(/da Gen 2026/)).toBeInTheDocument();
+
+  // …ma il pulsante attivo sì, ed è quello che dice all'utente dove si trova.
+  expect(screen.getByRole("button", { name: "YTD" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByRole("button", { name: "Tutto" })).toHaveAttribute("aria-pressed", "false");
+  window.location.hash = "";
+});
+
+test("la concentrazione nomina la posizione che pesa di più", async () => {
+  window.location.hash = "";
+  render(<App session={{ user: { id: "u1", email: "a@b.c" } }} />);
+  await waitFor(() => expect(apiFetch).toHaveBeenCalledWith("/api/config"));
+  await openTab("Analisi");
+
+  expect(await screen.findByText(/Posizione maggiore/i)).toBeInTheDocument();
+  // Globale: 12 quote da 120 = 1440; Bitcoin 1×500. Patrimonio = 1440+500+3000.
+  expect(screen.getByText(/da sola vale il/i)).toHaveTextContent("Globale");
+  window.location.hash = "";
+});
