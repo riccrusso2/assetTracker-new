@@ -97,6 +97,13 @@ Uses **LIFO** lots (the regime amministrato criterion), deliberately different f
 
 `/api/quote?isin=` proxies JustETF (European ETFs, 12-char ISIN). `/api/gold-price` proxies gold-api.com XAU/EUR and derives €/g and 18kt (÷31.1035 × 0.75). Both responses go through `cachedPrice` (in-memory Map, 5-minute TTL): the proxies are public and every client refresh would otherwise be an upstream call. `GET /health` is public and is what the Docker healthcheck probes — `/api/snapshots` answers 401 in Supabase mode. That endpoint uses a custom `https.Agent` pinned to 1.1.1.1/8.8.8.8 because Railway's musl resolver intermittently throws ENOTFOUND for that host — don't remove it. Both endpoints are public (no `requireAuth`) since they carry no user data.
 
+## Frontend design system
+
+- [src/styles.css](src/styles.css) is the one stylesheet. Tokens live on `:root` (dark, the default theme) and `[data-theme="light"]`; the legacy names (`--text-muted`, `--bg-card`, `--green`, …) are aliases of the new tokens because many inline styles in `App.js` still read them. Parameters were dealt with the taste skill, not picked: palette cool-grey-cobalt, Geist + Geist Mono (self-hosted in `src/fonts`, OFL), radius `sharp`, `solid` buttons, `initial` mark.
+- [src/ui.js](src/ui.js) holds presentation-only helpers (`Money`, `SegmentedBar`, the sliding tab indicator, the Recharts chrome constants). No financial logic there either.
+- Rules: one filled `.btn-primary` per view; colour stays 90–95% neutral (the accent is for the primary action, focus and the active state); never violet (OKLCH hue 270–330); the chart palette in `App.js` was validated with the dataviz `validate_palette.js` against `#ffffff` and `#141518`, re-run it if a slot changes; grids are solid hairlines and bars stay ≤ 24px; motion is transform/opacity only, nothing animates on scroll, `prefers-reduced-motion` is honoured.
+- The DOM tests rely on exactly two nav buttons per tab (sidebar + bottom nav), the tab order, the table column order and a single `role="status"` element (the toast): keep them when touching the shell.
+
 ## Env
 
 `REACT_APP_*` vars are baked into the CRA bundle at build time (hence the `ARG`/`ENV` pairs in the [Dockerfile](Dockerfile)) — public keys only. Server secrets (`SUPABASE_SERVICE_ROLE_KEY`) live in `server/.env` and must never reach the browser.

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { supabase } from "./supabaseClient";
-import { LogIn, UserPlus } from "lucide-react";
+import { LogIn, UserPlus, LineChart, Target, Share2 } from "lucide-react";
 
 // Schermata login / registrazione. Usata solo quando Supabase è configurato
 // e non c'è sessione attiva (vedi AuthGate).
@@ -34,42 +34,66 @@ export default function Auth() {
   };
 
   return (
-    <div className="app dark" style={{ minHeight: "100vh", display: "grid", placeItems: "center" }}>
-      <form onSubmit={submit} className="section-card" style={{ width: 360, maxWidth: "90vw" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-          <div className="logo-mark">PF</div>
-          <h1 className="app-title" style={{ fontSize: 20 }}>Portfolio Tracker</h1>
+    <div className="auth">
+      <aside className="auth__aside">
+        <div className="brand">
+          <span className="mark" aria-hidden="true">A</span>
+          <span className="brand__name">AssetTracker</span>
         </div>
-        <p className="muted" style={{ fontSize: 13, marginBottom: 16 }}>
-          {mode === "login" ? "Accedi al tuo portafoglio." : "Crea un nuovo account."}
-        </p>
-
-        <label className="field-label">Email
-          <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
-            className="field-input" autoComplete="email" />
-        </label>
-        <label className="field-label">Password
-          <input type="password" required minLength={6} value={pw} onChange={(e) => setPw(e.target.value)}
-            className="field-input" autoComplete={mode === "login" ? "current-password" : "new-password"} />
-        </label>
-
-        {msg && (
-          <p style={{ fontSize: 13, marginTop: 4, color: msg.type === "ok" ? "var(--green)" : "var(--red)" }}>
-            {msg.text}
+        <div>
+          <p className="auth__claim">Patrimonio, portafoglio e bilancio mensile in un solo posto.</p>
+          <p className="auth__lead">
+            ETF, oro, Bitcoin, startup e liquidità con prezzi aggiornati, snapshot mensili
+            e il budget da investire calcolato dalle tue entrate e spese.
           </p>
-        )}
+        </div>
+        <div className="auth__points">
+          <div className="auth__point"><LineChart/> Rendimento, rischio e fisco dallo storico mensile</div>
+          <div className="auth__point"><Target/> Ribilanciamento del budget verso i pesi target</div>
+          <div className="auth__point"><Share2/> Link di sola lettura da condividere</div>
+        </div>
+      </aside>
 
-        <button type="submit" className="btn btn-primary" disabled={busy}
-          style={{ width: "100%", justifyContent: "center", marginTop: 12 }}>
-          {mode === "login" ? <LogIn size={15} /> : <UserPlus size={15} />}
-          {busy ? "Attendere…" : mode === "login" ? "Accedi" : "Registrati"}
-        </button>
+      <main className="auth__main">
+        <form onSubmit={submit} className="auth__form">
+          <div className="brand mobile-brand">
+            <span className="mark" aria-hidden="true">A</span>
+            <span className="brand__name">AssetTracker</span>
+          </div>
+          <h1 className="auth__title">{mode === "login" ? "Accedi" : "Crea un account"}</h1>
+          <p className="auth__sub">
+            {mode === "login" ? "Accedi al tuo portafoglio." : "Crea un nuovo account."}
+          </p>
 
-        <button type="button" className="btn btn-ghost" onClick={() => { setMode(mode === "login" ? "signup" : "login"); setMsg(null); }}
-          style={{ width: "100%", justifyContent: "center", marginTop: 8, fontSize: 13 }}>
-          {mode === "login" ? "Non hai un account? Registrati" : "Hai già un account? Accedi"}
-        </button>
-      </form>
+          <label className="field-label">Email
+            <input type="email" required value={email} onChange={(e) => setEmail(e.target.value)}
+              className="field-input" autoComplete="email" />
+          </label>
+          <label className="field-label">Password
+            <input type="password" required minLength={6} value={pw} onChange={(e) => setPw(e.target.value)}
+              className="field-input" autoComplete={mode === "login" ? "current-password" : "new-password"} />
+            {mode === "signup" && <span className="field-hint">Almeno 6 caratteri.</span>}
+          </label>
+
+          {msg && (
+            <p className={`auth__msg ${msg.type === "ok" ? "auth__msg--ok" : "auth__msg--err"}`} role="alert">
+              {msg.text}
+            </p>
+          )}
+
+          <button type="submit" className="btn btn-primary" disabled={busy} style={{ width: "100%" }}>
+            {mode === "login" ? <LogIn size={16} /> : <UserPlus size={16} />}
+            {busy ? "Attendere…" : mode === "login" ? "Accedi" : "Registrati"}
+          </button>
+
+          <p className="auth__switch">
+            {mode === "login" ? "Non hai un account? " : "Hai già un account? "}
+            <button type="button" className="text-btn" onClick={() => { setMode(mode === "login" ? "signup" : "login"); setMsg(null); }}>
+              {mode === "login" ? "Registrati" : "Accedi"}
+            </button>
+          </p>
+        </form>
+      </main>
     </div>
   );
 }
