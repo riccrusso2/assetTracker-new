@@ -3,7 +3,7 @@ import React, {
   useCallback, useEffect, useMemo, useRef, useState,
 } from "react";
 import {
-  PieChart, Pie, Cell, Tooltip as ReTooltip, ResponsiveContainer,
+  Cell, Tooltip as ReTooltip, ResponsiveContainer,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, LineChart, Line,
   AreaChart, Area, ComposedChart, ReferenceLine,
 } from "recharts";
@@ -14,9 +14,14 @@ import {
   Activity, LayoutDashboard, Briefcase, Plus, CheckCircle,
   Shield, ChevronUp, ChevronDown, Wallet, Camera, Upload,
   Settings, Tag, LogOut, Share2, Copy, Eye, Link2, ArrowLeftRight,
-  PiggyBank, Receipt, HandCoins, Coins,
+  PiggyBank, Receipt, HandCoins, Coins, Lock, ArrowUpRight, ArrowDownRight,
+  Database,
 } from "lucide-react";
 import "./styles.css";
+import {
+  Money, useSlidingIndicator, useEntrance, SegmentedBar,
+  GRID, GRID_V, X_AXIS, Y_AXIS, CURSOR_LINE, CURSOR_BAND, ACTIVE_DOT, BAR_MAX, ANIM_MS, axisEuro,
+} from "./ui";
 import {
   r2, snapKey, isTotalTargetAsset, calcRebalancingTwoLevel,
   suStatus, calcStartupPortfolio, calcDrift, driftThreshold,
@@ -265,17 +270,21 @@ const exportCSV = (assets) => {
 // sulla superficie chiara/scura, non un flip automatico. Ordine degli slot fisso
 // (massimizza la separazione percettiva tra vicini, anche per i daltonici) e mai
 // riassegnato in base al rango: un asset tiene il suo colore anche se filtrato.
-const PALETTE_LIGHT = ["#2a78d6","#1baf7a","#eda100","#008300","#4a3aa7","#e34948","#e87ba4","#eb6834"];
-const PALETTE_DARK  = ["#3987e5","#199e70","#c98500","#008300","#9085e9","#e66767","#d55181","#d95926"];
+// Validata con validate_palette.js (skill dataviz) contro le superfici reali
+// delle card (#ffffff, #141518): tutti i controlli superati. Lo slot viola della
+// palette di riferimento è sostituito dal ciano, fuori dalla fascia viola che il
+// sistema esclude.
+const PALETTE_LIGHT = ["#2a78d6","#eb6834","#1baf7a","#eda100","#e87ba4","#008300","#0091b5","#e34948"];
+const PALETTE_DARK  = ["#3987e5","#d95926","#199e70","#c98500","#d55181","#0ca30c","#0aa2c7","#e66767"];
 
 // Oltre l'ottava serie non si generano nuove tinte (indistinguibili sotto CVD):
 // si riusa la stessa tinta con tratto tratteggiato — identità = colore + tratto.
 const seriesDash = (i) => (i >= 8 ? "6 4" : undefined);
 
 // Colori semantici (guadagno/perdita), non categoriali: non vanno mai usati come "serie N".
-const C_GAIN = "#10b981";
-const C_LOSS = "#ef4444";
-const C_CONTRIB = "#3b82f6";
+// Entrambi reggono 3:1 sulla card chiara e su quella scura.
+const C_GAIN = "#0f9960";
+const C_LOSS = "#e5484d";
 
 // Cella della heatmap: intensità proporzionale al rendimento, piena intorno al
 // ±5% mensile. Oltre quella soglia un colore più carico non distingue più nulla,
@@ -321,8 +330,12 @@ const StatusTag = ({ status }) => {
   return <span className={`status-tag ${s.cls}`}>{s.label}</span>;
 };
 
-const RiskCard = ({ label, value, fmt: fmtFn, tooltip, quality }) => {
-  const display = value == null ? "—" : (fmtFn ? fmtFn(value) : value);
+// Le chiamate passano il formattatore come `fmtFn`; la firma leggeva `fmt`, così
+// il formattatore non veniva mai applicato e a schermo finivano i decimali grezzi
+// (0.0642542976…). Si accettano entrambi i nomi.
+const RiskCard = ({ label, value, fmtFn, fmt: fmtAlias, tooltip, quality }) => {
+  const format = fmtFn || fmtAlias;
+  const display = value == null ? "—" : (format ? format(value) : value);
   const qualColor = quality === "good" ? "var(--green)" : quality === "bad" ? "var(--red)" : "var(--text-muted)";
   return (
     <div className="risk-card" title={tooltip}>
@@ -408,10 +421,10 @@ const AssetClassModal = ({ classes, onSave, onClose }) => {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 420 }}>
         <div className="modal-header">
-          <h3><Tag size={16} style={{ marginRight: 8 }}/>Gestisci Asset Class</h3>
-          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+          <h3><Tag size={16}/>Gestisci asset class</h3>
+          <button className="icon-btn" onClick={onClose} aria-label="Chiudi" title="Chiudi"><X size={18}/></button>
         </div>
-        <div className="modal-body" style={{ gap: 8, maxHeight: 360, overflowY: "auto" }}>
+        <div className="modal-body" style={{ gap: 0 }}>
           {list.map((cls, i) => (
             <div key={i} className="ac-row">
               {editIdx === i ? (
@@ -419,23 +432,23 @@ const AssetClassModal = ({ classes, onSave, onClose }) => {
                   <input className="field-input" style={{ flex: 1 }} value={editVal}
                     onChange={(e) => setEditVal(e.target.value)}
                     onKeyDown={(e) => e.key === "Enter" && saveEdit()} autoFocus/>
-                  <button className="btn btn-primary" style={{ padding: "6px 12px" }} onClick={saveEdit}><CheckCircle size={14}/></button>
-                  <button className="btn btn-ghost" style={{ padding: "6px 12px" }} onClick={() => setEditIdx(null)}><X size={14}/></button>
+                  <button className="btn btn-primary btn-sm" onClick={saveEdit} aria-label="Conferma"><CheckCircle size={14}/></button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setEditIdx(null)} aria-label="Annulla"><X size={14}/></button>
                 </>
               ) : (
                 <>
                   <span className="ac-name">{cls}</span>
-                  <button className="icon-btn" onClick={() => startEdit(i)}><Edit2 size={13}/></button>
-                  <button className="icon-btn danger" onClick={() => remove(i)}><Trash2 size={13}/></button>
+                  <button className="icon-btn" onClick={() => startEdit(i)} title="Rinomina" aria-label={`Rinomina ${cls}`}><Edit2 size={14}/></button>
+                  <button className="icon-btn danger" onClick={() => remove(i)} title="Rimuovi" aria-label={`Rimuovi ${cls}`}><Trash2 size={14}/></button>
                 </>
               )}
             </div>
           ))}
-          <div className="ac-row" style={{ marginTop: 8, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+          <div className="ac-row ac-row--new">
             <input className="field-input" style={{ flex: 1 }} placeholder="Nuova asset class…"
               value={newName} onChange={(e) => setNewName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && addNew()}/>
-            <button className="btn btn-primary" style={{ padding: "6px 12px" }} onClick={addNew}>
+            <button className="btn btn-ghost btn-sm" onClick={addNew}>
               <Plus size={14}/> Aggiungi
             </button>
           </div>
@@ -490,7 +503,7 @@ const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, fromTx = false, 
       <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{asset?.id ? "Modifica asset" : "Aggiungi asset"}</h3>
-          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+          <button className="icon-btn" onClick={onClose} aria-label="Chiudi" title="Chiudi"><X size={18}/></button>
         </div>
         <div className="modal-body">
           {[
@@ -505,7 +518,7 @@ const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, fromTx = false, 
               <input type={type} value={form[key] ?? ""} onChange={(e) => set(key, e.target.value)}
                 className="field-input" step="any" readOnly={locked}
                 title={locked ? "Calcolato dai movimenti registrati" : undefined}
-                style={locked ? { opacity: 0.6, cursor: "not-allowed" } : undefined}/>
+                />
             </label>
           ))}
           {fromTx && (
@@ -535,7 +548,7 @@ const AssetModal = ({ asset, assetClasses, etfTargetOthers = 0, fromTx = false, 
             {onTotal
               ? "Il peso target è calcolato sull'intero patrimonio (liquidità, ETF, startup, oro). L'asset viene mostrato nella sezione Oro & Bitcoin."
               : targetOver
-                ? `⚠ Target massimo ${targetLeft}%: gli altri asset ne occupano già ${etfTargetOthers}% e la somma non può superare 100%.`
+                ? `Target massimo ${targetLeft}%: gli altri asset ne occupano già ${etfTargetOthers}% e la somma non può superare 100%.`
                 : `Il peso target è calcolato sul solo sotto-portafoglio ETF. Target disponibile: ${targetLeft}% (altri asset: ${etfTargetOthers}%).`}
           </p>
           <p className="hint-text" style={{ marginTop: 0 }}>
@@ -586,7 +599,7 @@ const StartupModal = ({ startup, onSave, onClose }) => {
       <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{startup?.id ? "Modifica startup" : "Aggiungi startup"}</h3>
-          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+          <button className="icon-btn" onClick={onClose} aria-label="Chiudi" title="Chiudi"><X size={18}/></button>
         </div>
         <div className="modal-body">
           <label className="field-label">Nome *
@@ -630,13 +643,14 @@ const StartupModal = ({ startup, onSave, onClose }) => {
               </label>
               <label className="field-label">Note (opzionale)
                 <textarea rows={3} value={form.exitNotes ?? ""} onChange={(e) => set("exitNotes", e.target.value)} className="field-input"
-                  style={{ resize: "vertical", fontFamily: "'Outfit', sans-serif" }}/>
+                  />
               </label>
             </>
           )}
           {form.status === "failed" && (
-            <p className="hint-text" style={{ margin: 0 }}>
-              ⚠ Startup fallita: valore finale <strong>0 €</strong>. La perdita sarà pari al costo totale (investito + commissioni).
+            <p className="hint-text is-warn" style={{ margin: 0 }}>
+              <AlertTriangle size={15}/>
+              <span>Startup fallita: valore finale <strong>0 €</strong>. La perdita sarà pari al costo totale (investito + commissioni).</span>
             </p>
           )}
         </div>
@@ -688,7 +702,7 @@ const SnapshotModal = ({ snap, preset, nearest, taken, onSave, onClose }) => {
       <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{editing ? `Modifica snapshot ${snap.label}` : "Aggiungi snapshot"}</h3>
-          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+          <button className="icon-btn" onClick={onClose} aria-label="Chiudi" title="Chiudi"><X size={18}/></button>
         </div>
         <div className="modal-body">
           <label className="field-label">Anno *
@@ -706,8 +720,9 @@ const SnapshotModal = ({ snap, preset, nearest, taken, onSave, onClose }) => {
               onChange={(e) => set("totalValue", e.target.value)} className="field-input"/>
           </label>
           {dup && (
-            <p className="hint-text" style={{ margin: 0, color: "var(--red)" }}>
-              ⚠ Esiste già uno snapshot per questo mese: modificalo invece di crearne un altro.
+            <p className="hint-text is-warn" style={{ margin: 0 }}>
+              <AlertTriangle size={15}/>
+              <span>Esiste già uno snapshot per questo mese: modificalo invece di crearne un altro.</span>
             </p>
           )}
           {!editing && (
@@ -769,7 +784,7 @@ const CashflowModal = ({ month, taken, expenseBudget = 0, onSave, onClose }) => 
       <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{editing ? `Modifica ${MONTH_LABELS_IT[mese - 1]} ${year}` : "Aggiungi mese"}</h3>
-          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+          <button className="icon-btn" onClick={onClose} aria-label="Chiudi" title="Chiudi"><X size={18}/></button>
         </div>
         <div className="modal-body">
           <label className="field-label">Anno *
@@ -819,13 +834,15 @@ const CashflowModal = ({ month, taken, expenseBudget = 0, onSave, onClose }) => 
             </div>
           )}
           {expenseBudget > 0 && expenses > expenseBudget && (
-            <p className="hint-text" style={{ margin: 0, color: "var(--amber)" }}>
-              ⚠ Spese sopra il tetto mensile di {fmt(expenseBudget)} ({fmt(r2(expenses - expenseBudget))} in più).
+            <p className="hint-text is-warn" style={{ margin: 0 }}>
+              <AlertTriangle size={15}/>
+              <span>Spese sopra il tetto mensile di {fmt(expenseBudget)} ({fmt(r2(expenses - expenseBudget))} in più).</span>
             </p>
           )}
           {dup && (
-            <p className="hint-text" style={{ margin: 0, color: "var(--red)" }}>
-              ⚠ Questo mese è già registrato: modificalo invece di crearne un altro.
+            <p className="hint-text is-warn" style={{ margin: 0 }}>
+              <AlertTriangle size={15}/>
+              <span>Questo mese è già registrato: modificalo invece di crearne un altro.</span>
             </p>
           )}
           <p className="hint-text" style={{ margin: 0 }}>
@@ -891,7 +908,7 @@ const TxModal = ({ tx, options, onSave, onClose }) => {
       <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
           <h3>{tx?.id ? "Modifica movimento" : "Aggiungi movimento"}</h3>
-          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+          <button className="icon-btn" onClick={onClose} aria-label="Chiudi" title="Chiudi"><X size={18}/></button>
         </div>
         <div className="modal-body">
           <label className="field-label">Data *
@@ -976,8 +993,8 @@ const GoldEtfModal = ({ goldEtf, etfTargetOthers = 0, fromTx = false, onSave, on
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <h3>⚙️ Configura ETF Oro quotato</h3>
-          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+          <h3><Coins size={16}/>Configura ETF oro quotato</h3>
+          <button className="icon-btn" onClick={onClose} aria-label="Chiudi" title="Chiudi"><X size={18}/></button>
         </div>
         <div className="modal-body">
           <label className="field-label">Nome
@@ -991,13 +1008,13 @@ const GoldEtfModal = ({ goldEtf, etfTargetOthers = 0, fromTx = false, onSave, on
             <input type="number" step="any" value={form.quantity} onChange={(e) => set("quantity", e.target.value)}
               className="field-input" readOnly={fromTx}
               title={fromTx ? "Calcolato dai movimenti registrati" : undefined}
-              style={fromTx ? { opacity: 0.6, cursor: "not-allowed" } : undefined}/>
+              />
           </label>
           <label className="field-label">Prezzo medio carico (€/quota)
             <input type="number" step="any" value={form.costBasis} onChange={(e) => set("costBasis", e.target.value)}
               className="field-input" readOnly={fromTx}
               title={fromTx ? "Calcolato dai movimenti registrati" : undefined}
-              style={fromTx ? { opacity: 0.6, cursor: "not-allowed" } : undefined}/>
+              />
           </label>
           {fromTx && (
             <p className="hint-text" style={{ marginTop: 0 }}>
@@ -1020,7 +1037,7 @@ const GoldEtfModal = ({ goldEtf, etfTargetOthers = 0, fromTx = false, onSave, on
             {onTotal
               ? "Il peso considera ETF oro + oro fisico sull'intero patrimonio. Con molta liquidità l'oro risulta spesso sottopesato e il budget mensile va prima tutto qui."
               : targetOver
-                ? `⚠ Target massimo ${targetLeft}%: gli altri asset quotati ne occupano già ${etfTargetOthers}% e la somma non può superare 100%.`
+                ? `Target massimo ${targetLeft}%: gli altri asset quotati ne occupano già ${etfTargetOthers}% e la somma non può superare 100%.`
                 : `Il target è calcolato sul solo sotto-portafoglio ETF (es. 90% globale / 10% oro), indipendente da liquidità e startup. L'oro fisico non entra nel calcolo: conta solo l'ETF quotato. Target disponibile: ${targetLeft}% (altri asset: ${etfTargetOthers}%).`}
           </p>
           <p className="hint-text" style={{ marginTop: 0 }}>
@@ -1067,8 +1084,8 @@ const PhysGoldModal = ({ physGold, onSave, onClose }) => {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <h3>🔶 Oro fisico 18kt</h3>
-          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+          <h3><Coins size={16}/>Oro fisico 18kt</h3>
+          <button className="icon-btn" onClick={onClose} aria-label="Chiudi" title="Chiudi"><X size={18}/></button>
         </div>
         <div className="modal-body">
           <label className="field-label">Grammatura totale (g) *
@@ -1084,7 +1101,7 @@ const PhysGoldModal = ({ physGold, onSave, onClose }) => {
           </label>
           <p className="hint-text" style={{ marginTop: 0 }}>
             Il prezzo 18kt viene aggiornato automaticamente tramite <strong>gold-api.com</strong>:<br/>
-            <code style={{ fontSize: 11 }}>prezzo spot (€/oz) ÷ 31,1035 × 0,75</code><br/>
+            <code>prezzo spot (€/oz) ÷ 31,1035 × 0,75</code><br/>
             Inserisci un valore manuale solo per sovrascrivere il fetch automatico.
           </p>
         </div>
@@ -1099,7 +1116,11 @@ const PhysGoldModal = ({ physGold, onSave, onClose }) => {
   );
 };
 
-// ---- Custom Tooltip ----
+// ---- Tooltip dei grafici ----
+// Il valore è l'elemento forte, il nome della serie lo segue; ogni riga ha la
+// sua chiave a linea nel colore della serie (skill dataviz, Tooltips).
+const TipKey = ({ color }) => <i className="tt-key" style={{ background: color }}/>;
+
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
   return (
@@ -1107,7 +1128,7 @@ const CustomTooltip = ({ active, payload, label }) => {
       <div className="tooltip-label">{label}</div>
       {payload.map((p, i) => (
         <div key={i} className="tooltip-row">
-          <span style={{ color: p.color }}>{p.name}</span>
+          <span><TipKey color={p.color || p.fill}/>{p.name}</span>
           <span>{fmt(p.value)}</span>
         </div>
       ))}
@@ -1119,10 +1140,10 @@ const ProjectionTooltip = ({ active, payload, label, projReturn }) => {
   if (!active || !payload?.length) return null;
   const d = payload[0].payload;
   return (
-    <div className="chart-tooltip" style={{ minWidth: 190 }}>
+    <div className="chart-tooltip" style={{ minWidth: 230 }}>
       <div className="tooltip-label">Anno {label}</div>
       <div className="tooltip-row"><span>Ottimistico (+{projReturn + 3}%)</span><span>{fmt(d.optimistic)}</span></div>
-      <div className="tooltip-row" style={{ fontWeight: 700 }}><span>Base ({projReturn}%)</span><span>{fmt(d.base)}</span></div>
+      <div className="tooltip-row"><span><TipKey color="var(--accent)"/>Base ({projReturn}%)</span><span>{fmt(d.base)}</span></div>
       <div className="tooltip-row"><span>Pessimistico ({Math.max(projReturn - 3, 0)}%)</span><span>{fmt(d.pessimistic)}</span></div>
     </div>
   );
@@ -1132,24 +1153,24 @@ const SnapshotTooltip = ({ active, payload, label, snapshots }) => {
   if (!active || !payload?.length) return null;
   const snap = snapshots.find((s) => s.label === label);
   return (
-    <div className="chart-tooltip" style={{ minWidth: 200, maxHeight: 320, overflowY: "auto" }}>
+    <div className="chart-tooltip" style={{ minWidth: 240, maxHeight: 340, overflowY: "auto" }}>
       <div className="tooltip-label">{label}</div>
       {payload.map((p, i) => {
         if (p.dataKey === "__total__") return (
           <div key={i} className="tooltip-row">
-            <span style={{ color: p.color, fontWeight: 700 }}>Portafoglio</span>
-            <span style={{ fontWeight: 700 }}>{p.value?.toFixed(1)} <span style={{ color: "var(--text-muted)", fontSize: 11 }}>({snap ? fmt(snap.totalValue) : ""})</span></span>
+            <span><TipKey color={p.color}/>Portafoglio</span>
+            <span>{p.value?.toFixed(1)} <span className="muted" style={{ fontWeight: 400 }}>({snap ? fmt(snap.totalValue) : ""})</span></span>
           </div>
         );
         const assetSnap = snap?.assets?.find((a) => snapKey(a) === p.dataKey);
         return (
           <div key={i} className="tooltip-row">
-            <span style={{ color: p.color }}>{p.name}</span>
-            <span>{p.value?.toFixed(1)} <span style={{ color: "var(--text-muted)", fontSize: 11 }}>({assetSnap ? fmt(assetSnap.value) : ""})</span></span>
+            <span><TipKey color={p.color}/>{p.name}</span>
+            <span>{p.value?.toFixed(1)} <span className="muted" style={{ fontWeight: 400 }}>({assetSnap ? fmt(assetSnap.value) : ""})</span></span>
           </div>
         );
       })}
-      <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>Indice 100 = primo snapshot</div>
+      <div className="tooltip-note">Indice 100 = primo snapshot</div>
     </div>
   );
 };
@@ -1208,8 +1229,8 @@ const ShareModal = ({ onClose }) => {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" ref={dialogRef} role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 520 }}>
         <div className="modal-header">
-          <h3><Share2 size={16} style={{ marginRight: 8 }}/> Condividi portafoglio</h3>
-          <button className="icon-btn" onClick={onClose}><X size={18}/></button>
+          <h3><Share2 size={16}/>Condividi portafoglio</h3>
+          <button className="icon-btn" onClick={onClose} aria-label="Chiudi" title="Chiudi"><X size={18}/></button>
         </div>
         <div className="modal-body">
           <p className="muted" style={{ fontSize: 13, margin: 0 }}>
@@ -1239,7 +1260,7 @@ const ShareModal = ({ onClose }) => {
                 </div>
               </label>
               {copied && (
-                <span style={{ fontSize: 12, color: "var(--green)" }}>✓ Link copiato negli appunti</span>
+                <span className="field-hint" style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "var(--pos)" }}><CheckCircle size={14}/> Link copiato negli appunti</span>
               )}
               <p className="hint-text" style={{ margin: 0 }}>
                 Il link contiene un codice casuale non indovinabile. Puoi disattivarlo
@@ -1269,6 +1290,13 @@ const ShareModal = ({ onClose }) => {
       </div>
     </div>
   );
+};
+
+// Solo presentazione: segna le .table-wrap che scorrono in orizzontale.
+const markScrollableTables = () => {
+  document.querySelectorAll(".table-wrap").forEach((w) => {
+    w.classList.toggle("is-scrollable", w.scrollWidth > w.clientWidth + 1);
+  });
 };
 
 // ====================== HOOKS ======================
@@ -1373,6 +1401,7 @@ export default function App({ session, shareToken } = {}) {
   }, []);
   useEffect(() => () => clearTimeout(toastTimer.current), []);
 
+  const entering = useEntrance();
   const [hiddenLines,  setHiddenLines]  = useState(new Set());
   const [focusedLine,  setFocusedLine]  = useState(null);
   const [tab,          setTab]          = useState("overview");
@@ -1448,7 +1477,15 @@ export default function App({ session, shareToken } = {}) {
       });
       table.querySelectorAll("tfoot td").forEach((td) => role(td, "cell"));
     });
+    markScrollableTables();
   });
+
+  // Tabelle più larghe del pannello: la classe fissa la colonna del nome mentre
+  // si scorre in orizzontale (styles.css). Ricalcolata al ridimensionamento.
+  useEffect(() => {
+    window.addEventListener("resize", markScrollableTables);
+    return () => window.removeEventListener("resize", markScrollableTables);
+  }, []);
 
   // Load snapshots from server (in vista condivisa arrivano da /api/public)
   useEffect(() => {
@@ -1844,6 +1881,8 @@ const refreshGoldPrices = useCallback(async () => {
   // Palette del tema corrente. Lo slot dipende dalla posizione dell'asset, non dal suo valore.
   const palette = dark ? PALETTE_DARK : PALETTE_LIGHT;
   const seriesColor = (i) => palette[i % palette.length];
+  // I versamenti hanno il colore del primo slot, ricalibrato sul tema.
+  const C_CONTRIB = palette[0];
 
   // Patrimonio in euro nel tempo (asse unico, valuta): il dato che si guarda per primo.
   const patrimonioData = useMemo(
@@ -2493,60 +2532,125 @@ const refreshGoldPrices = useCallback(async () => {
   }, []);
 
   // ====================== TAB: OVERVIEW ======================
+  const allocTotal = fullClassDist.reduce((acc, d) => acc + d.value, 0);
   const renderOverview = () => (
     <div className="tab-content">
       {isEmpty ? (
         <div className="welcome-card">
-          <div className="welcome-icon">📊</div>
-          <h2 className="welcome-title">Benvenuto in Portfolio Tracker</h2>
-          <p className="welcome-desc">
-            Inizia aggiungendo i tuoi investimenti dalla sezione <strong>Portafoglio</strong>.
-            Puoi aggiungere ETF, azioni, startup, oro e liquidità.
-          </p>
-          {!readOnly && (
-            <button className="btn btn-primary" onClick={() => { goTab("portfolio"); setAssetModal({}); }} style={{ fontSize: 15, padding: "10px 24px" }}>
-              <Plus size={16}/> Inizia ad aggiungere asset
-            </button>
-          )}
+          <div>
+            <div className="welcome-icon"><LayoutDashboard/></div>
+            <h2 className="welcome-title">Benvenuto in AssetTracker</h2>
+            <p className="welcome-desc">
+              Inizia aggiungendo i tuoi investimenti dalla sezione <strong>Portafoglio</strong>.
+              Puoi aggiungere ETF, azioni, startup, oro e liquidità.
+            </p>
+            {!readOnly && (
+              <button className="btn btn-primary" onClick={() => { goTab("portfolio"); setAssetModal({}); }}>
+                <Plus size={16}/> Inizia ad aggiungere asset
+              </button>
+            )}
+          </div>
           <div className="welcome-features">
-            <div className="wf-item"><span>📈</span> Prezzi live via JustETF</div>
-            <div className="wf-item"><span>💰</span> Prezzo oro 18kt live</div>
-            <div className="wf-item"><span>🎯</span> Ribilanciamento automatico</div>
-            <div className="wf-item"><span>📷</span> Snapshot mensili</div>
-            <div className="wf-item"><span>🔮</span> Proiezioni future</div>
-            <div className="wf-item"><span>💾</span> Backup configurazione</div>
+            <div className="wf-item"><TrendingUp/> Prezzi live via JustETF</div>
+            <div className="wf-item"><Coins/> Prezzo oro 18kt live</div>
+            <div className="wf-item"><Target/> Ribilanciamento automatico</div>
+            <div className="wf-item"><Camera/> Snapshot mensili</div>
+            <div className="wf-item"><LineChartIcon/> Proiezioni future</div>
+            <div className="wf-item"><Database/> Backup configurazione</div>
           </div>
         </div>
       ) : (
         <>
-          <div className="hero-grid">
-            <KpiCard hero label="Patrimonio totale" value={fmt(grandTotal)} icon={Wallet}
-              sub={`Liquidità: ${fmt(totalCash)}`} color="blue"
-              trend={monthDelta?.pct} trendLabel={monthDelta ? `${fmt(monthDelta.abs)} vs ${monthDelta.label}` : null}
-              footer={
+          {/* ---- Patrimonio: la cifra che si guarda per prima, col suo andamento ---- */}
+          <section className="hero-panel" aria-label="Patrimonio totale e andamento">
+            <div className="hero-panel__main">
+              <span className="hero-panel__label"><Wallet/> Patrimonio totale</span>
+              <div className="rise-mask">
+                <p className="hero-figure"><Money text={fmt(grandTotal)}/></p>
+              </div>
+              <div className="hero-rest enter-seq">
+                {monthDelta && (
+                  <div className="hero-delta">
+                    <span className={`delta-pill ${monthDelta.pct >= 0 ? "pos" : "neg"}`}>
+                      {monthDelta.pct >= 0 ? <ArrowUpRight/> : <ArrowDownRight/>}
+                      {Math.abs(monthDelta.pct).toFixed(2)}%
+                    </span>
+                    <span>{fmt(monthDelta.abs)} vs {monthDelta.label}</span>
+                  </div>
+                )}
+                <p className="hero-sub">Liquidità: <strong>{fmt(totalCash)}</strong></p>
                 <div className="hero-chips">
                   <span className={`chip ${driftOver ? "chip-warn" : "chip-ok"}`}
                     title={drift.worst
                       ? `Scostamento maggiore: ${drift.worst.name} (${drift.worst.actualPct.toFixed(1)}% contro un target del ${drift.worst.targetPct}%)`
                       : "Nessun target impostato"}>
-                    {driftOver ? <AlertTriangle size={12}/> : <CheckCircle size={12}/>}
+                    {driftOver ? <AlertTriangle/> : <CheckCircle/>}
                     Deriva max {driftMax.toFixed(1)} pt
                   </span>
                   <span className="chip">
-                    <Camera size={12}/> {snapshots.length} snapshot
+                    <Camera/> {snapshots.length} snapshot
                   </span>
                   {/* Il ponte col bilancio: il patrimonio dice dove sei, questo
                       dice quanto puoi aggiungerci questo mese. */}
                   {investable.available > 0 && (
                     <span className="chip chip-ok"
                       title={`Risparmio del mese meno quanto manca al fondo di sicurezza. Dettaglio nella tab Bilancio.${investable.extraFromCash > 0 ? ` Più ${fmt(investable.extraFromCash)} di liquidità già oltre il fondo.` : ""}`}>
-                      <PiggyBank size={12}/> Investibile {fmt(investable.available, true)}
+                      <PiggyBank/> Investibile {fmt(investable.available, true)}
                     </span>
                   )}
                 </div>
-              }/>
+              </div>
+            </div>
+
+            <div className="hero-panel__chart">
+              <div className="chart-head">
+                <span className="chart-head__title">Andamento patrimonio</span>
+                {patrimonioData.length > 1 && (
+                  <span className="chart-head__range">
+                    {patrimonioData[0].label} – {patrimonioData.at(-1).label}
+                  </span>
+                )}
+              </div>
+              {patrimonioData.length > 1 ? (
+                <>
+                  <div className="chart-box">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={patrimonioData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                        <defs>
+                          <linearGradient id="gPatrimonio" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="0%"   stopColor={palette[0]} stopOpacity={0.18}/>
+                            <stop offset="100%" stopColor={palette[0]} stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid {...GRID}/>
+                        <XAxis dataKey="label" {...X_AXIS}/>
+                        <YAxis {...Y_AXIS} tickFormatter={(v) => `${axisEuro(v)} €`}
+                          domain={["auto", "auto"]} width={60}/>
+                        <ReTooltip content={<CustomTooltip/>} cursor={CURSOR_LINE}/>
+                        <Area type="monotone" dataKey="value" name="Patrimonio"
+                          stroke={palette[0]} strokeWidth={2} fill="url(#gPatrimonio)"
+                          dot={false} activeDot={ACTIVE_DOT} animationDuration={900}/>
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <p className="hint-text">
+                    Valore totale del portafoglio a ogni snapshot mensile. Include i versamenti:
+                    per separare mercato e versamenti guarda il grafico "Crescita" più sotto.
+                  </p>
+                </>
+              ) : (
+                <div className="chart-empty chart-box">
+                  <p className="muted" style={{ margin: 0, padding: 16 }}>
+                    L'andamento compare dal secondo snapshot mensile.
+                  </p>
+                </div>
+              )}
+            </div>
+          </section>
+
+          <div className="grid-3 enter-seq">
             <KpiCard compact label="ETF & Asset quotati" value={fmt(totals.val, true)} icon={Activity}
-              trend={totals.ret * 100} color="blue"/>
+              trend={totals.ret * 100} trendLabel="sul costo" color="blue"/>
             <KpiCard compact label="Oro" value={fmt(goldTotal, true)} icon={Shield}
               color={goldEtfValue >= goldEtfCost ? "green" : "red"}
               sub={goldTotal > 0 && grandTotal > 0 ? `${((goldTotal / grandTotal) * 100).toFixed(1)}% del patrimonio` : null}
@@ -2555,9 +2659,9 @@ const refreshGoldPrices = useCallback(async () => {
               color={startupStats.roiOverallPct != null && startupStats.roiOverallPct < 0 ? "red" : "blue"}
               sub={`Commissioni: ${fmt(suFees)} · Abbonamento: ${fmt(suAbbonamenti)}`}
               footer={startups.length > 0 && (
-                <div className="kpi-sub" style={{ marginTop: 6 }}>
+                <div className="kpi-sub">
                   {startupStats.allClosed ? "Risultato finale" : "Complessivo"}:{" "}
-                  <strong style={{ color: startupStats.pnlOverall >= 0 ? "var(--green)" : "var(--red)" }}>
+                  <strong style={{ color: startupStats.pnlOverall >= 0 ? "var(--pos)" : "var(--neg)" }}>
                     {fmt(startupStats.pnlOverall)}
                   </strong>
                   {startupStats.closed.length > 0 && (
@@ -2567,52 +2671,16 @@ const refreshGoldPrices = useCallback(async () => {
               )}/>
           </div>
 
-          {patrimonioData.length > 1 && (
-            <div className="section-card">
-              <h3 className="section-title"><TrendingUp size={16}/> Andamento patrimonio</h3>
-              <div style={{ height: 260 }}>
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={patrimonioData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
-                    <defs>
-                      <linearGradient id="gPatrimonio" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%"  stopColor={palette[0]} stopOpacity={0.25}/>
-                        <stop offset="95%" stopColor={palette[0]} stopOpacity={0}/>
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid stroke="var(--border)" vertical={false}/>
-                    <XAxis dataKey="label" tick={{ fontSize: 11 }} stroke="var(--text-muted)"/>
-                    <YAxis tickFormatter={(v) => `€${(v / 1000).toFixed(0)}k`} tick={{ fontSize: 11 }}
-                      stroke="var(--text-muted)" domain={["auto", "auto"]} width={56}/>
-                    <ReTooltip content={<CustomTooltip/>}/>
-                    <Area type="monotone" dataKey="value" name="Patrimonio"
-                      stroke={palette[0]} strokeWidth={2} fill="url(#gPatrimonio)"
-                      dot={false} activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--bg-card)" }}/>
-                  </AreaChart>
-                </ResponsiveContainer>
-              </div>
-              <p className="hint-text" style={{ marginTop: 4 }}>
-                Valore totale del portafoglio a ogni snapshot mensile. Include i versamenti:
-                per separare mercato e versamenti guarda il grafico "Crescita" più sotto.
-              </p>
-            </div>
-          )}
-
-          <div className="grid-2">
+          <div className="grid-split">
+            <div className="stack">
             {fullClassDist.length > 0 && (
               <div className="section-card">
-                <h3 className="section-title"><PieChartIcon size={16}/> Asset allocation</h3>
-                <div style={{ height: 240 }}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={fullClassDist} dataKey="value" nameKey="name"
-                        cx="50%" cy="50%" outerRadius={95} innerRadius={52}
-                        stroke="var(--bg-card)" strokeWidth={2}>
-                        {fullClassDist.map((_, i) => <Cell key={i} fill={seriesColor(i)}/>)}
-                      </Pie>
-                      <ReTooltip formatter={(v, n) => [fmt(v), n]}/>
-                    </PieChart>
-                  </ResponsiveContainer>
+                <div className="panel-head">
+                  <h3 className="section-title"><PieChartIcon/> Asset allocation</h3>
+                  <span className="panel-meta">{fullClassDist.length} voci</span>
                 </div>
+                <SegmentedBar items={fullClassDist} total={allocTotal} label="Asset allocation"
+                  colorOf={(d) => seriesColor(fullClassDist.indexOf(d))} fmtValue={(v) => fmt(v)}/>
                 <div className="alloc-legend">
                   {fullClassDist.map((d, i) => (
                     <div key={d.name} className="alloc-row">
@@ -2627,24 +2695,49 @@ const refreshGoldPrices = useCallback(async () => {
                 </div>
               </div>
             )}
+            <div className="section-card">
+              <div className="performer">
+                <span className="performer__icon pos"><TrendingUp/></span>
+                <div className="performer__body">
+                  <h3 className="performer__label">Miglior performer</h3>
+                  {totals.best
+                    ? <div className="big-name" title={totals.best.name}>{totals.best.name}</div>
+                    : <p className="muted" style={{ margin: 0 }}>Nessun dato disponibile</p>}
+                </div>
+                {totals.best && <Badge value={totals.best.perf * 100}/>}
+              </div>
+            </div>
+            <div className="section-card">
+              <div className="performer">
+                <span className="performer__icon neg"><TrendingDown/></span>
+                <div className="performer__body">
+                  <h3 className="performer__label">Peggior performer</h3>
+                  {totals.worst
+                    ? <div className="big-name" title={totals.worst.name}>{totals.worst.name}</div>
+                    : <p className="muted" style={{ margin: 0 }}>Nessun dato disponibile</p>}
+                </div>
+                {totals.worst && <Badge value={totals.worst.perf * 100}/>}
+              </div>
+            </div>
+            </div>
 
             <div className="section-card">
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-                <h3 className="section-title" style={{ margin: 0 }}><LineChartIcon size={16}/> Prezzi asset — base 100</h3>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <div className="panel-head">
+                <h3 className="section-title"><LineChartIcon/> Prezzi asset — base 100</h3>
+                <div className="btn-row">
                   {!readOnly && (
                     <>
                       <input ref={importSnapshotsRef} type="file" accept=".json" style={{ display: "none" }}
                         onChange={(e) => { importSnapshots(e.target.files[0]); e.target.value = ""; }}/>
-                      <button className="btn btn-ghost" onClick={() => importSnapshotsRef.current?.click()} style={{ fontSize: 12, padding: "6px 12px" }}>
-                        <Upload size={13}/> Importa
+                      <button className="btn btn-ghost btn-sm" onClick={() => importSnapshotsRef.current?.click()}>
+                        <Upload/> Importa
                       </button>
-                      <button className="btn btn-ghost" onClick={exportSnapshotsFile} disabled={snapshots.length === 0} style={{ fontSize: 12, padding: "6px 12px" }}>
-                        <Download size={13}/> Esporta{snapshots.length > 0 ? ` (${snapshots.length})` : ""}
+                      <button className="btn btn-ghost btn-sm" onClick={exportSnapshotsFile} disabled={snapshots.length === 0}>
+                        <Download/> Esporta{snapshots.length > 0 ? ` (${snapshots.length})` : ""}
                       </button>
-                      <button className="btn btn-primary" onClick={saveMonthlySnapshot}
-                        disabled={snapshotSaving || isLoading || assets.length === 0} style={{ fontSize: 12, padding: "6px 12px" }}>
-                        <Camera size={13}/> {snapshotSaving ? "Salvataggio…" : "Snapshot mensile"}
+                      <button className="btn btn-primary btn-sm" onClick={saveMonthlySnapshot}
+                        disabled={snapshotSaving || isLoading || assets.length === 0}>
+                        <Camera/> {snapshotSaving ? "Salvataggio…" : "Snapshot mensile"}
                       </button>
                     </>
                   )}
@@ -2652,30 +2745,28 @@ const refreshGoldPrices = useCallback(async () => {
               </div>
               {snapshotChartData.length === 0 ? (
                 <div className="chart-empty" style={{ height: 280 }}>
-                  <div style={{ textAlign: "center" }}>
-                    <p className="muted" style={{ marginBottom: 8 }}>Nessuno snapshot registrato.</p>
-                    <p className="muted" style={{ fontSize: 12 }}>Premi <strong>Snapshot mensile</strong> ogni mese per tracciare l'andamento.</p>
+                  <div>
+                    <p className="muted" style={{ margin: "0 0 8px" }}>Nessuno snapshot registrato.</p>
+                    <p className="muted" style={{ margin: 0, fontSize: 13 }}>Premi <strong>Snapshot mensile</strong> ogni mese per tracciare l'andamento.</p>
                   </div>
                 </div>
               ) : (
                 <>
-                  <div style={{ height: 260 }}>
+                  <div style={{ height: 280 }}>
                     <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={snapshotChartData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
-                        <CartesianGrid stroke="var(--border)" vertical={false}/>
-                        <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="var(--text-muted)"/>
-                        <YAxis tickFormatter={(v) => v + ""} tick={{ fontSize: 10 }} stroke="var(--text-muted)" domain={["auto","auto"]}
-                          label={{ value: "Indice (base 100)", angle: -90, position: "insideLeft",
-                            style: { fontSize: 10, fill: "var(--text-muted)" }, offset: 10 }}/>
-                        <ReTooltip content={<SnapshotTooltip snapshots={snapshots}/>}/>
-                        <ReferenceLine y={100} stroke="var(--border2)"/>
+                      <LineChart data={snapshotChartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                        <CartesianGrid {...GRID}/>
+                        <XAxis dataKey="label" {...X_AXIS}/>
+                        <YAxis {...Y_AXIS} tickFormatter={(v) => v + ""} domain={["auto","auto"]} width={44}/>
+                        <ReTooltip content={<SnapshotTooltip snapshots={snapshots}/>} cursor={CURSOR_LINE}/>
+                        <ReferenceLine y={100} stroke="var(--chart-axis)"/>
                         {assetIds.map((id, i) => (
                           <Line key={id} type="monotone" dataKey={id} name={assetNameMap[id] || id}
                             stroke={seriesColor(i)} strokeDasharray={seriesDash(i)}
                             strokeWidth={focusedLine === id ? 3 : 2}
                             strokeOpacity={focusedLine && focusedLine !== id ? 0.15 : 1}
                             dot={snapshotChartData.length === 1 ? { r: 4 } : false}
-                            activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--bg-card)" }} hide={hiddenLines.has(id)}/>
+                            activeDot={ACTIVE_DOT} hide={hiddenLines.has(id)} animationDuration={ANIM_MS}/>
                         ))}
                       </LineChart>
                     </ResponsiveContainer>
@@ -2683,8 +2774,9 @@ const refreshGoldPrices = useCallback(async () => {
                   <div className="snapshot-legend">
                     {assetIds.map((id, i) => (
                       <button key={id} className={`legend-item ${hiddenLines.has(id) ? "legend-item--hidden" : ""}`}
-                        onClick={() => toggleLine(id)}
-                        onMouseEnter={() => setFocusedLine(id)} onMouseLeave={() => setFocusedLine(null)}>
+                        onClick={() => toggleLine(id)} aria-pressed={!hiddenLines.has(id)}
+                        onMouseEnter={() => setFocusedLine(id)} onMouseLeave={() => setFocusedLine(null)}
+                        onFocus={() => setFocusedLine(id)} onBlur={() => setFocusedLine(null)}>
                         <span className={`legend-line ${seriesDash(i) ? "legend-line--dashed" : ""}`}
                           style={{ color: seriesColor(i) }}/>
                         {assetNameMap[id] || id}
@@ -2696,45 +2788,37 @@ const refreshGoldPrices = useCallback(async () => {
             </div>
           </div>
 
-          <div className="grid-2">
-            <div className="section-card">
-              <h3 className="section-title"><TrendingUp size={16}/> Miglior performer</h3>
-              {totals.best
-                ? <><div className="big-name">{totals.best.name}</div><Badge value={totals.best.perf * 100}/></>
-                : <p className="muted">Nessun dato disponibile</p>}
-            </div>
-            <div className="section-card">
-              <h3 className="section-title"><TrendingDown size={16}/> Peggior performer</h3>
-              {totals.worst
-                ? <><div className="big-name">{totals.worst.name}</div><Badge value={totals.worst.perf * 100}/></>
-                : <p className="muted">Nessun dato disponibile</p>}
-            </div>
-          </div>
-
-
           {growthRows.length > 0 && (
             <div className="section-card">
-              <h3 className="section-title"><TrendingUp size={16}/> Crescita: versamenti vs mercato</h3>
-              <div className="kpi-mini-row" style={{ marginBottom: 12 }}>
-                <span>Versamenti: <strong style={{ color: "var(--blue)" }}>{fmt(growthTotals.contrib)}</strong></span>
-                <span>Mercato: <strong style={{ color: growthTotals.market >= 0 ? "var(--green)" : "var(--red)" }}>{fmt(growthTotals.market)}</strong></span>
-                <span className="muted" style={{ fontSize: 12 }}>Tutto il patrimonio, dagli snapshot mensili</span>
+              <div className="panel-head">
+                <h3 className="section-title"><TrendingUp/> Crescita: versamenti vs mercato</h3>
+                <span className="panel-meta">Tutto il patrimonio, dagli snapshot mensili</span>
+              </div>
+              <div className="summary-strip" style={{ marginBottom: 20, maxWidth: 480 }}>
+                <div className="ss-item">
+                  <span className="ss-label">Versamenti</span>
+                  <span className="ss-value mono">{fmt(growthTotals.contrib)}</span>
+                </div>
+                <div className="ss-item">
+                  <span className="ss-label">Mercato</span>
+                  <span className={`ss-value mono ${growthTotals.market >= 0 ? "pos-text" : "neg-text"}`}>{fmt(growthTotals.market)}</span>
+                </div>
               </div>
               <div className="chart-legend">
                 <span className="cl-item"><span className="cl-swatch" style={{ background: C_CONTRIB }}/>Versamenti</span>
                 <span className="cl-item"><span className="cl-swatch" style={{ background: C_GAIN }}/>Mercato in guadagno</span>
                 <span className="cl-item"><span className="cl-swatch" style={{ background: C_LOSS }}/>Mercato in perdita</span>
               </div>
-              <div style={{ height: 240 }}>
+              <div style={{ height: 260 }}>
                 <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={growthRows} margin={{ top: 4, right: 16, left: 0, bottom: 4 }} barGap={2}>
-                    <CartesianGrid stroke="var(--border)" vertical={false}/>
-                    <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="var(--text-muted)"/>
-                    <YAxis tickFormatter={(v) => `€${(v / 1000).toFixed(1)}k`} tick={{ fontSize: 10 }} stroke="var(--text-muted)" width={56}/>
-                    <ReTooltip content={<CustomTooltip/>} cursor={{ fill: "var(--bg-card2)" }}/>
-                    <ReferenceLine y={0} stroke="var(--border2)"/>
-                    <Bar dataKey="contrib" name="Versamenti" fill={C_CONTRIB} radius={[4, 4, 0, 0]}/>
-                    <Bar dataKey="market"  name="Mercato" fill={C_GAIN} radius={[4, 4, 0, 0]}>
+                  <BarChart data={growthRows} margin={{ top: 8, right: 8, left: 0, bottom: 0 }} barGap={2}>
+                    <CartesianGrid {...GRID}/>
+                    <XAxis dataKey="label" {...X_AXIS}/>
+                    <YAxis {...Y_AXIS} tickFormatter={(v) => `${axisEuro(v)} €`} width={60}/>
+                    <ReTooltip content={<CustomTooltip/>} cursor={CURSOR_BAND}/>
+                    <ReferenceLine y={0} stroke="var(--chart-axis)"/>
+                    <Bar dataKey="contrib" name="Versamenti" fill={C_CONTRIB} radius={[4, 4, 0, 0]} maxBarSize={BAR_MAX} animationDuration={ANIM_MS}/>
+                    <Bar dataKey="market"  name="Mercato" fill={C_GAIN} radius={[4, 4, 0, 0]} maxBarSize={BAR_MAX} animationDuration={ANIM_MS}>
                       {growthRows.map((d, i) => (
                         <Cell key={i} fill={d.market >= 0 ? C_GAIN : C_LOSS}/>
                       ))}
@@ -2782,8 +2866,8 @@ const refreshGoldPrices = useCallback(async () => {
           <>
             {/* Quanto posso investire — il ponte col ribilanciamento */}
             <div className="section-card">
-              <div className="table-controls" style={{ marginBottom: 12 }}>
-                <h2 className="section-title" style={{ margin: 0 }}>
+              <div className="panel-head">
+                <h2 className="section-title">
                   <HandCoins size={16}/> Questo mese puoi investire
                 </h2>
                 <div className="btn-row">
@@ -2812,7 +2896,7 @@ const refreshGoldPrices = useCallback(async () => {
                           <Wallet size={12}/> +{fmt(investable.extraFromCash)} da liquidità
                         </span>
                       )}
-                      <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+                      <button className="btn btn-ghost btn-sm"
                         onClick={() => applyInvestableBudget(investable.available)}
                         disabled={investable.available <= 0}>
                         <Target size={12}/> Usa come budget
@@ -2896,16 +2980,15 @@ const refreshGoldPrices = useCallback(async () => {
               <div style={{ height: 260 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <ComposedChart data={chartRows} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
-                    <CartesianGrid stroke="var(--border)" vertical={false}/>
-                    <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="var(--text-muted)"/>
-                    <YAxis tickFormatter={(v) => `€${(v / 1000).toFixed(1)}k`} tick={{ fontSize: 10 }}
-                      stroke="var(--text-muted)" width={56}/>
-                    <ReTooltip content={<CustomTooltip/>} cursor={{ fill: "var(--bg-card2)" }}/>
-                    <ReferenceLine y={0} stroke="var(--border2)"/>
-                    <Bar dataKey="entrate" name="Entrate" fill={C_GAIN} radius={[4, 4, 0, 0]}/>
-                    <Bar dataKey="spese"   name="Spese"   fill={C_LOSS} radius={[4, 4, 0, 0]}/>
+                    <CartesianGrid {...GRID}/>
+                    <XAxis dataKey="label" {...X_AXIS}/>
+                    <YAxis {...Y_AXIS} tickFormatter={(v) => `${axisEuro(v)} €`} width={60}/>
+                    <ReTooltip content={<CustomTooltip/>} cursor={CURSOR_BAND}/>
+                    <ReferenceLine y={0} stroke="var(--chart-axis)"/>
+                    <Bar dataKey="entrate" name="Entrate" fill={C_GAIN} radius={[4, 4, 0, 0]} maxBarSize={BAR_MAX}/>
+                    <Bar dataKey="spese"   name="Spese"   fill={C_LOSS} radius={[4, 4, 0, 0]} maxBarSize={BAR_MAX}/>
                     <Line type="monotone" dataKey="risparmio" name="Risparmio" stroke={C_CONTRIB}
-                      strokeWidth={2} dot={{ r: 3 }}/>
+                      strokeWidth={2} dot={{ r: 4, strokeWidth: 2, stroke: "var(--card)", fill: C_CONTRIB }} activeDot={ACTIVE_DOT}/>
                   </ComposedChart>
                 </ResponsiveContainer>
               </div>
@@ -2927,14 +3010,13 @@ const refreshGoldPrices = useCallback(async () => {
               <div style={{ height: 240 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={planRows} margin={{ top: 4, right: 16, left: 0, bottom: 4 }} barGap={2}>
-                    <CartesianGrid stroke="var(--border)" vertical={false}/>
-                    <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="var(--text-muted)"/>
-                    <YAxis tickFormatter={(v) => `€${(v / 1000).toFixed(1)}k`} tick={{ fontSize: 10 }}
-                      stroke="var(--text-muted)" width={56}/>
-                    <ReTooltip content={<CustomTooltip/>} cursor={{ fill: "var(--bg-card2)" }}/>
-                    <ReferenceLine y={0} stroke="var(--border2)"/>
-                    <Bar dataKey="piano"   name="Piano"   fill={palette[2]} radius={[4, 4, 0, 0]}/>
-                    <Bar dataKey="versato" name="Versato" fill={C_CONTRIB} radius={[4, 4, 0, 0]}/>
+                    <CartesianGrid {...GRID}/>
+                    <XAxis dataKey="label" {...X_AXIS}/>
+                    <YAxis {...Y_AXIS} tickFormatter={(v) => `${axisEuro(v)} €`} width={60}/>
+                    <ReTooltip content={<CustomTooltip/>} cursor={CURSOR_BAND}/>
+                    <ReferenceLine y={0} stroke="var(--chart-axis)"/>
+                    <Bar dataKey="piano"   name="Piano"   fill={palette[2]} radius={[4, 4, 0, 0]} maxBarSize={BAR_MAX}/>
+                    <Bar dataKey="versato" name="Versato" fill={C_CONTRIB} radius={[4, 4, 0, 0]} maxBarSize={BAR_MAX}/>
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -2952,11 +3034,11 @@ const refreshGoldPrices = useCallback(async () => {
 
             {/* Storico mensile */}
             <div className="section-card">
-              <div className="table-controls" style={{ marginBottom: 12 }}>
-                <h3 className="section-title" style={{ margin: 0 }}>
+              <div className="panel-head">
+                <h3 className="section-title">
                   <Receipt size={16}/> Storico mensile
                 </h3>
-                <span className="muted" style={{ fontSize: 13 }}>
+                <span className="panel-meta">
                   {cfTotals.months} mesi · media risparmio {fmt(cfTotals.avgSavings)}
                 </span>
               </div>
@@ -2980,7 +3062,7 @@ const refreshGoldPrices = useCallback(async () => {
                       <tr key={r.id}>
                         <td className="asset-name">
                           {cfLabel(r)}
-                          {r.note && <span className="muted" style={{ fontSize: 11 }}> · {r.note}</span>}
+                          {r.note && <span className="cell-sub"> · {r.note}</span>}
                         </td>
                         <td className="num mono">{fmt(r.salary)}</td>
                         <td className="num mono">{r.extra ? fmt(r.extra) : "—"}</td>
@@ -3041,26 +3123,26 @@ const refreshGoldPrices = useCallback(async () => {
     <div className="tab-content">
       {/* Liquidità */}
       <div className="section-card">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <h2 className="section-title" style={{ margin: 0 }}><Wallet size={16}/> Liquidità</h2>
+        <div className="panel-head">
+          <h2 className="section-title"><Wallet size={16}/> Liquidità</h2>
           {!editCash ? (
-            !readOnly && <button className="icon-btn" onClick={() => { setCashInput(totalCash); setEditCash(true); }}><Edit2 size={14}/></button>
+            !readOnly && <button className="icon-btn" onClick={() => { setCashInput(totalCash); setEditCash(true); }} title="Modifica liquidità" aria-label="Modifica liquidità"><Edit2 size={14}/></button>
           ) : (
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <div className="cash-edit">
               <input type="number" step="any" value={cashInput} onChange={(e) => setCashInput(e.target.value)}
-                className="field-input" style={{ width: 140 }}/>
+                className="field-input" aria-label="Liquidità in euro"/>
               <button className="btn btn-primary" onClick={() => { setCash(parseFloat(cashInput) || 0); setEditCash(false); }}>
                 <CheckCircle size={14}/> OK
               </button>
-              <button className="btn btn-ghost" onClick={() => setEditCash(false)}><X size={14}/></button>
+              <button className="btn btn-ghost" onClick={() => setEditCash(false)} aria-label="Annulla"><X size={14}/></button>
             </div>
           )}
         </div>
         {!editCash && (
-          <div style={{ fontSize: "1.6rem", fontWeight: 700, fontFamily: "'JetBrains Mono', monospace", marginTop: 8 }}>
+          <div className="cash-figure">
             {totalCash > 0
               ? fmt(totalCash)
-              : <span className="muted" style={{ fontSize: "1rem" }}>
+              : <span className="muted" style={{ fontSize: 15, fontWeight: 400, letterSpacing: 0 }}>
                   {readOnly ? "Nessuna liquidità registrata" : "Clicca la matita per inserire la liquidità"}
                 </span>}
           </div>
@@ -3069,10 +3151,10 @@ const refreshGoldPrices = useCallback(async () => {
 
       {/* ETF & Asset */}
       <div className="section-card">
-        <div className="table-controls" style={{ marginBottom: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <h2 className="section-title" style={{ margin: 0 }}><Briefcase size={16}/> ETF & Asset quotati</h2>
-            {etfSubTotal > 0 && <span className="muted" style={{ fontSize: 13 }}>Totale: <strong>{fmt(etfSubTotal)}</strong></span>}
+        <div className="panel-head">
+          <div className="panel-head__group">
+            <h2 className="section-title"><Briefcase size={16}/> ETF & Asset quotati</h2>
+            {etfSubTotal > 0 && <span className="panel-meta">Totale: <strong>{fmt(etfSubTotal)}</strong></span>}
           </div>
           <div className="btn-row">
             {!readOnly && (
@@ -3081,10 +3163,10 @@ const refreshGoldPrices = useCallback(async () => {
               </button>
             )}
             {etfAssets.length > 0 && (
-              <div className="search-wrap" style={{ maxWidth: 260 }}>
+              <div className="search-wrap">
                 <Search size={15} className="search-icon"/>
-                <input className="search-input" placeholder="Cerca…" value={search} onChange={(e) => setSearch(e.target.value)}/>
-                {search && <button className="icon-btn" onClick={() => setSearch("")}><X size={14}/></button>}
+                <input className="search-input" placeholder="Cerca per nome o ISIN" aria-label="Cerca asset" value={search} onChange={(e) => setSearch(e.target.value)}/>
+                {search && <button className="icon-btn" onClick={() => setSearch("")} aria-label="Cancella ricerca"><X size={14}/></button>}
               </div>
             )}
             {etfAssets.length > 0 && (
@@ -3172,7 +3254,7 @@ const refreshGoldPrices = useCallback(async () => {
                               : `I target inseriti sommano a ${etfTargetSum}%: il confronto e il ribilanciamento usano il valore normalizzato a 100, cioè ${etfTargetOf(a)}%.`}>
                             {a.targetWeight || 0}%
                             {etfTargetSum !== 100 && (
-                              <span className="muted" style={{ fontSize: 10 }}> → {etfTargetOf(a)}%</span>
+                              <span className="cell-sub"> → {etfTargetOf(a)}%</span>
                             )}
                           </span>
                         </td>
@@ -3180,8 +3262,8 @@ const refreshGoldPrices = useCallback(async () => {
                         <td>
                           {!readOnly && (
                             <div className="row-actions">
-                              <button className="icon-btn" onClick={() => setAssetModal(a)}><Edit2 size={14}/></button>
-                              <button className="icon-btn danger" onClick={() => { if (window.confirm(`Rimuovere ${a.name}?`)) deleteAsset(a.id); }}>
+                              <button className="icon-btn" onClick={() => setAssetModal(a)} title="Modifica" aria-label="Modifica"><Edit2 size={14}/></button>
+                              <button className="icon-btn danger" title="Rimuovi" aria-label="Rimuovi" onClick={() => { if (window.confirm(`Rimuovere ${a.name}?`)) deleteAsset(a.id); }}>
                                 <Trash2 size={14}/>
                               </button>
                             </div>
@@ -3196,7 +3278,7 @@ const refreshGoldPrices = useCallback(async () => {
                       pur restando nella sezione Oro & Bitcoin: qui in chiaro,
                       altrimenti totale e somma target non tornerebbero. */}
                   {!goldOnTotal && goldEtf.identifier && (
-                    <tr className="total-row" style={{ opacity: 0.75 }}>
+                    <tr className="total-row total-row--aside">
                       <td colSpan={5}>{goldEtf.name} <span className="muted">(sezione Oro &amp; Bitcoin)</span></td>
                       <td className="num mono">{goldEtfValue > 0 ? fmt(goldEtfValue) : "—"}</td>
                       <td colSpan={hasTxCols ? 4 : 2}></td>
@@ -3238,16 +3320,16 @@ const refreshGoldPrices = useCallback(async () => {
           </>
         )}
       </div>
-      <div className="section-card" style={{ borderColor: goldBtcTotal > 0 ? "rgba(245,158,11,0.4)" : undefined }}>
+      <div className="section-card">
         {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20, flexWrap: "wrap", gap: 10 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-            <h2 className="section-title" style={{ margin: 0 }}>
+        <div className="panel-head">
+          <div className="panel-head__group">
+            <h2 className="section-title">
               Oro &amp; Bitcoin
             </h2>
             {goldBtcTotal > 0 && (
-              <div className="kpi-mini-row" style={{ marginBottom: 0 }}>
-                <span>Totale: <strong style={{ color: "var(--amber)" }}>{fmt(goldBtcTotal)}</strong></span>
+              <div className="kpi-mini-row">
+                <span>Totale: <strong>{fmt(goldBtcTotal)}</strong></span>
                 {grandTotal > 0 && (
                   <span>
                     <strong>{((goldBtcTotal / grandTotal) * 100).toFixed(1)}%</strong>
@@ -3262,7 +3344,6 @@ const refreshGoldPrices = useCallback(async () => {
               className="btn btn-ghost"
               onClick={refreshGoldPrices}
               disabled={goldLoading || isLoading}
-              style={{ fontSize: 13 }}
             >
               <RefreshCw size={14} className={(goldLoading || loading[goldEtf.id]) ? "spin" : ""}/>
               {goldLoading ? "Aggiornamento…" : "Aggiorna prezzi oro"}
@@ -3272,15 +3353,15 @@ const refreshGoldPrices = useCallback(async () => {
 
         {goldPriceErr && (
           <div className="alert alert-amber" style={{ marginBottom: 16 }}>
-            <AlertTriangle size={14}/> {goldPriceErr}
-            <span style={{ fontSize: 12, marginLeft: 8, opacity: 0.8 }}>
-              — Assicurati che il backend esponga <code style={{ background: "rgba(0,0,0,0.2)", padding: "1px 5px", borderRadius: 4 }}>/api/gold-price</code>
-            </span>
+            <AlertTriangle size={14}/> <span>{goldPriceErr}
+            <span className="muted">
+              — Assicurati che il backend esponga <code>/api/gold-price</code>
+            </span></span>
           </div>
         )}
 
         {/* ---- ETF Oro quotato ---- */}
-        <div style={{ marginBottom: 20 }}>
+        <div className="gold-block">
           <div className="gold-sub-header">
             <span className="gold-sub-label">ETF Oro quotato</span>
             {!readOnly && (
@@ -3291,15 +3372,13 @@ const refreshGoldPrices = useCallback(async () => {
           </div>
 
           {!goldEtf.identifier ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px",
-              background: "rgba(245,158,11,0.06)", border: "1px dashed rgba(245,158,11,0.3)",
-              borderRadius: "var(--radius-sm)", color: "var(--amber)" }}>
+            <div className="empty-inline">
               <AlertTriangle size={14}/>
-              <span style={{ fontSize: 13 }}>
+              <span>
                 {readOnly ? "Nessun ETF oro configurato." : "Configura l'ETF oro inserendo ISIN e quantità."}
               </span>
               {!readOnly && (
-                <button className="btn btn-ghost" style={{ marginLeft: "auto", padding: "4px 12px", fontSize: 12 }}
+                <button className="btn btn-ghost btn-sm"
                   onClick={() => setGoldEtfModal(true)}>
                   Configura
                 </button>
@@ -3342,7 +3421,7 @@ const refreshGoldPrices = useCallback(async () => {
                           sotto-portafoglio quotato, secondo la modalità scelta. */}
                       <td className="num mono" title={goldOnTotal ? "ETF oro + oro fisico sul patrimonio totale" : "Solo ETF oro sul sotto-portafoglio ETF"}>
                         {goldPct != null ? `${goldPct.toFixed(2)}%` : "—"}
-                        <span className="muted" style={{ fontSize: 10 }}>{goldOnTotal ? " tot" : " etf"}</span>
+                        <span className="cell-sub">{goldOnTotal ? " tot" : " etf"}</span>
                       </td>
                       <td className="num">
                         {(() => {
@@ -3372,7 +3451,7 @@ const refreshGoldPrices = useCallback(async () => {
         </div>
 
         {/* ---- Oro fisico 18kt ---- */}
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
+        <div className="gold-block">
           <div className="gold-sub-header">
             <span className="gold-sub-label">Oro fisico 18kt</span>
             {!readOnly && (
@@ -3383,14 +3462,12 @@ const refreshGoldPrices = useCallback(async () => {
           </div>
 
           {physGold.grams === 0 ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px",
-              background: "var(--bg-card2)", border: "1px dashed var(--border)",
-              borderRadius: "var(--radius-sm)", color: "var(--text-muted)" }}>
-              <span style={{ fontSize: 13 }}>
+            <div className="empty-inline">
+              <span>
                 Nessun oro fisico registrato.{!readOnly && " Clicca la matita per inserire la grammatura."}
               </span>
               {!readOnly && (
-                <button className="btn btn-ghost" style={{ marginLeft: "auto", padding: "4px 12px", fontSize: 12 }}
+                <button className="btn btn-ghost btn-sm"
                   onClick={() => setPhysGoldModal(true)}>
                   Aggiungi
                 </button>
@@ -3406,13 +3483,13 @@ const refreshGoldPrices = useCallback(async () => {
                       <th className="num">Grammatura</th>
                       <th className="num">Prezzo 18kt /g</th>
                       <th className="num">Valore totale</th>
-                      <th className="num" style={{ fontSize: 10, whiteSpace: "nowrap" }}>Ult. agg.</th>
+                      <th className="num">Ult. agg.</th>
                     </tr>
                   </thead>
                   <tbody>
                     <tr>
                       <td>
-                        <span className="class-tag" style={{ background: "rgba(245,158,11,0.1)", borderColor: "rgba(245,158,11,0.3)", color: "var(--amber)" }}>
+                        <span className="class-tag class-tag--gold">
                           18kt
                         </span>
                         {" "}Oro fisico
@@ -3420,13 +3497,13 @@ const refreshGoldPrices = useCallback(async () => {
                       <td className="num mono"><strong>{physGold.grams} g</strong></td>
                       <td className="num mono">
                         {physGold.pricePerGram18kt
-                          ? <span style={{ color: "var(--amber)" }}>{fmt(physGold.pricePerGram18kt)}</span>
+                          ? fmt(physGold.pricePerGram18kt)
                           : <span className="muted">—</span>}
                       </td>
                       <td className="num mono">
                         <strong>{physGoldValue > 0 ? fmt(physGoldValue) : "—"}</strong>
                       </td>
-                      <td className="num muted" style={{ fontSize: 11 }}>
+                      <td className="num muted">
                         {physGold.lastUpdated
                           ? new Date(physGold.lastUpdated).toLocaleDateString("it-IT")
                           : "—"}
@@ -3436,12 +3513,13 @@ const refreshGoldPrices = useCallback(async () => {
                 </table>
               </div>
               {physGold.grams > 0 && !physGold.pricePerGram18kt && (
-                <p className="hint-text">
-                  ⚠ Prezzo 18kt non disponibile. Premi <strong>Aggiorna prezzi oro</strong> oppure inserisci il prezzo manualmente dalla matita.
+                <p className="hint-text is-warn">
+                  <AlertTriangle size={15}/>
+                  <span>Prezzo 18kt non disponibile. Premi <strong>Aggiorna prezzi oro</strong> oppure inserisci il prezzo manualmente dalla matita.</span>
                 </p>
               )}
               {physGold.grams > 0 && physGold.pricePerGram18kt && (
-                <p className="hint-text" style={{ color: "var(--text-muted)" }}>
+                <p className="hint-text">
                   Calcolato come <strong>spot XAU/EUR (oz) ÷ 31,1035 × 0,75</strong> via gold-api.com.
                   {physGold.lastUpdated && (
                     <> Aggiornato il {new Date(physGold.lastUpdated).toLocaleString("it-IT")}.</>
@@ -3453,9 +3531,9 @@ const refreshGoldPrices = useCallback(async () => {
         </div>
 
         {/* ---- Bitcoin & asset con target sul patrimonio ---- */}
-        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16, marginTop: 16 }}>
+        <div className="gold-block">
           <div className="gold-sub-header">
-            <span className="gold-sub-label">Bitcoin</span>
+            <span className="gold-sub-label gold-sub-label--btc">Bitcoin</span>
             {!readOnly && (
               <button className="icon-btn" onClick={() => setAssetModal({ targetOnTotal: true, assetClass: "Crypto" })}
                 title="Aggiungi asset con target sul patrimonio totale">
@@ -3465,14 +3543,12 @@ const refreshGoldPrices = useCallback(async () => {
           </div>
 
           {totalTargetAssets.length === 0 ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px",
-              background: "var(--bg-card2)", border: "1px dashed var(--border)",
-              borderRadius: "var(--radius-sm)", color: "var(--text-muted)" }}>
-              <span style={{ fontSize: 13 }}>
+            <div className="empty-inline">
+              <span>
                 Nessun Bitcoin registrato.{!readOnly && " Aggiungi un ETP con target in % del patrimonio totale."}
               </span>
               {!readOnly && (
-                <button className="btn btn-ghost" style={{ marginLeft: "auto", padding: "4px 12px", fontSize: 12 }}
+                <button className="btn btn-ghost btn-sm"
                   onClick={() => setAssetModal({ targetOnTotal: true, assetClass: "Crypto" })}>
                   Aggiungi
                 </button>
@@ -3523,8 +3599,8 @@ const refreshGoldPrices = useCallback(async () => {
                           <td>
                             {!readOnly && (
                               <div className="row-actions">
-                                <button className="icon-btn" onClick={() => setAssetModal(a)}><Edit2 size={14}/></button>
-                                <button className="icon-btn danger" onClick={() => { if (window.confirm(`Rimuovere ${a.name}?`)) deleteAsset(a.id); }}>
+                                <button className="icon-btn" onClick={() => setAssetModal(a)} title="Modifica" aria-label="Modifica"><Edit2 size={14}/></button>
+                                <button className="icon-btn danger" title="Rimuovi" aria-label="Rimuovi" onClick={() => { if (window.confirm(`Rimuovere ${a.name}?`)) deleteAsset(a.id); }}>
                                   <Trash2 size={14}/>
                                 </button>
                               </div>
@@ -3546,11 +3622,11 @@ const refreshGoldPrices = useCallback(async () => {
 
       {/* Startup */}
       <div className="section-card">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <h2 className="section-title" style={{ margin: 0 }}><Activity size={16}/> Investimenti Startup</h2>
+        <div className="panel-head">
+          <div className="panel-head__group">
+            <h2 className="section-title"><Activity size={16}/> Investimenti Startup</h2>
             {startups.length > 0 && (
-              <div className="kpi-mini-row" style={{ marginBottom: 0 }}>
+              <div className="kpi-mini-row">
                 <span>Attive: <strong>{startupStats.active.length}</strong></span>
                 <span>Concluse: <strong>{startupStats.closed.length}</strong></span>
                 <span>Abbonamento: <strong>{fmt(suAbbonamenti)}</strong></span>
@@ -3559,7 +3635,7 @@ const refreshGoldPrices = useCallback(async () => {
             )}
           </div>
           {!readOnly && (
-            <button className="btn btn-primary" onClick={() => setStartupModal({})}><Plus size={15}/> Aggiungi startup</button>
+            <button className="btn btn-ghost" onClick={() => setStartupModal({})}><Plus size={15}/> Aggiungi startup</button>
           )}
         </div>
 
@@ -3639,13 +3715,13 @@ const refreshGoldPrices = useCallback(async () => {
             )}
             <p className="hint-text" style={{ marginTop: 10 }}>
               {startupStats.allClosed
-                ? `🏁 Bilancio finale: a fronte di ${fmt(startupStats.totalOutlay)} di esborso complessivo (capitale + commissioni + abbonamento) hai recuperato ${fmt(startupStats.totalValue)}, con un risultato di ${fmt(startupStats.pnlOverall)}.`
+                ? `Bilancio finale: a fronte di ${fmt(startupStats.totalOutlay)} di esborso complessivo (capitale + commissioni + abbonamento) hai recuperato ${fmt(startupStats.totalValue)}, con un risultato di ${fmt(startupStats.pnlOverall)}.`
                 : <>
                     {startupStats.closed.length === 0
                       ? "Nessuna startup conclusa: P&L realizzato e ROI su concluse si calcolano su Exit e Fallimenti."
                       : startupStats.pnlTot >= 0
-                        ? `✅ Sulle ${startupStats.closed.length} startup concluse hai recuperato ${fmt(startupStats.recoveredTot)} a fronte di ${fmt(startupStats.closedCost)} di costo totale (commissioni incluse).`
-                        : `⚠ Sulle ${startupStats.closed.length} startup concluse hai recuperato ${fmt(startupStats.recoveredTot)} a fronte di ${fmt(startupStats.closedCost)} di costo totale (commissioni incluse): il capitale non è ancora rientrato.`}
+                        ? `Sulle ${startupStats.closed.length} startup concluse hai recuperato ${fmt(startupStats.recoveredTot)} a fronte di ${fmt(startupStats.closedCost)} di costo totale (commissioni incluse).`
+                        : `Sulle ${startupStats.closed.length} startup concluse hai recuperato ${fmt(startupStats.recoveredTot)} a fronte di ${fmt(startupStats.closedCost)} di costo totale (commissioni incluse): il capitale non è ancora rientrato.`}
                     {" "}Il ROI complessivo include l'abbonamento ({fmt(startupStats.subscription)}) e valorizza le {startupStats.active.length} attive a {fmt(startupStats.activeValue)}: diventerà il risultato definitivo quando tutte saranno chiuse.
                   </>}
               {" "}Le startup attive ({fmt(startupStats.activeValue)}) entrano nel patrimonio alla valutazione dichiarata, al costo dove non c'è; le concluse ne escono — l'incasso di un'exit va inserito a mano in liquidità. Per non far leggere il guadagno come un versamento, aggiorna prima la valutazione della posizione e incassa il mese successivo.
@@ -3699,8 +3775,8 @@ const refreshGoldPrices = useCallback(async () => {
                     <td>
                       {!readOnly && (
                         <div className="row-actions">
-                          <button className="icon-btn" onClick={() => setStartupModal(s)}><Edit2 size={14}/></button>
-                          <button className="icon-btn danger" onClick={() => { if (window.confirm(`Rimuovere ${s.name}?`)) deleteSU(s.id); }}>
+                          <button className="icon-btn" onClick={() => setStartupModal(s)} title="Modifica" aria-label="Modifica"><Edit2 size={14}/></button>
+                          <button className="icon-btn danger" title="Rimuovi" aria-label="Rimuovi" onClick={() => { if (window.confirm(`Rimuovere ${s.name}?`)) deleteSU(s.id); }}>
                             <Trash2 size={14}/>
                           </button>
                         </div>
@@ -3733,21 +3809,21 @@ const refreshGoldPrices = useCallback(async () => {
       {/* Config export/import — riservato al proprietario */}
       {!readOnly && (
       <div className="section-card">
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <div className="panel-head">
           <div>
-            <h3 className="section-title" style={{ margin: 0 }}><Settings size={16}/> Configurazione portafoglio</h3>
-            <p className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+            <h3 className="section-title"><Settings size={16}/> Configurazione portafoglio</h3>
+            <p className="hint-text" style={{ marginTop: 6 }}>
               Il portafoglio viene <strong>salvato automaticamente sul server</strong> a ogni modifica.
               Export/import JSON servono solo come backup o per migrare su un'altra installazione.
             </p>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <div className="btn-row">
             <input ref={configImportRef} type="file" accept=".json" style={{ display: "none" }}
               onChange={(e) => { importConfig(e.target.files[0]); e.target.value = ""; }}/>
             <button className="btn btn-ghost" onClick={() => configImportRef.current?.click()}>
               <Upload size={15}/> Importa
             </button>
-            <button className="btn btn-primary" onClick={exportConfig}>
+            <button className="btn btn-ghost" onClick={exportConfig}>
               <Download size={15}/> Esporta configurazione
             </button>
           </div>
@@ -3767,10 +3843,10 @@ const refreshGoldPrices = useCallback(async () => {
       {/* ---- Storico snapshot ---- */}
       {!readOnly && (
         <div className="section-card">
-          <div className="table-controls" style={{ marginBottom: 12 }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-              <h3 className="section-title" style={{ margin: 0 }}><Camera size={16}/> Storico snapshot</h3>
-              <span className="muted" style={{ fontSize: 13 }}>{snapshots.length} mesi</span>
+          <div className="panel-head">
+            <div className="panel-head__group">
+              <h3 className="section-title"><Camera size={16}/> Storico snapshot</h3>
+              <span className="panel-meta">{snapshots.length} mesi</span>
             </div>
             <div className="btn-row">
               <button className="btn btn-ghost" onClick={() => setSnapModal({})}>
@@ -3787,7 +3863,7 @@ const refreshGoldPrices = useCallback(async () => {
                 I rendimenti di quei periodi vengono attribuiti al mese successivo.
                 {" "}
                 {snapshotGaps.map((g) => (
-                  <button key={g.label} className="btn btn-ghost" style={{ padding: "2px 8px", marginRight: 4 }}
+                  <button key={g.label} className="btn btn-ghost btn-sm"
                     onClick={() => setSnapModal({ year: g.year, month: g.month, totalValue: "" })}>
                     + {g.label}
                   </button>
@@ -3800,7 +3876,7 @@ const refreshGoldPrices = useCallback(async () => {
             <EmptyState icon={Camera} title="Nessuno snapshot"
               description="Lo snapshot del mese corrente viene creato da solo a ogni modifica. Per lo storico passato puoi importare un file o aggiungere i mesi a mano."/>
           ) : (
-            <div className="table-wrap">
+            <div className="table-wrap table-wrap--scroll">
               <table className="data-table">
                 <thead>
                   <tr>
@@ -3851,8 +3927,9 @@ const refreshGoldPrices = useCallback(async () => {
         <>
           {/* Finestra temporale: vale per tutte le analisi sotto. */}
           <div className="section-card period-bar">
-            <span className="section-title" style={{ margin: 0 }}>Periodo</span>
-            <div className="period-tabs" role="group" aria-label="Periodo delle analisi">
+            <span className="section-title">Periodo</span>
+            <div className="period-tabs" role="group" aria-label="Periodo delle analisi" ref={periodInd.containerRef}>
+              <span className="period-ind" ref={periodInd.indRef} aria-hidden="true"/>
               {PERIODS.map((p) => (
                 <button key={p.id} className={`period-btn ${period === p.id ? "active" : ""}`}
                   aria-pressed={period === p.id} onClick={() => setPeriod(p.id)}>
@@ -3860,7 +3937,7 @@ const refreshGoldPrices = useCallback(async () => {
                 </button>
               ))}
             </div>
-            <span className="muted" style={{ fontSize: 12, marginLeft: "auto" }}>
+            <span className="period-bar__info">
               {anaSnaps.length > 1
                 ? <>{anaSnaps.length} mesi · da {anaSnaps[0].label} a {anaSnaps.at(-1).label}</>
                 : "Storico insufficiente per questo periodo"}
@@ -3868,8 +3945,8 @@ const refreshGoldPrices = useCallback(async () => {
           </div>
 
           <div className="section-card">
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-              <h3 className="section-title" style={{ margin: 0 }}><Shield size={16}/> Metriche di rischio</h3>
+            <div className="panel-head">
+              <h3 className="section-title"><Shield size={16}/> Metriche di rischio</h3>
               <span className={`target-badge ${riskMetrics.quality === "solido" ? "ok" : "under"}`}>
                 {riskObs} osservazioni — {riskMetrics.quality}
               </span>
@@ -3898,7 +3975,7 @@ const refreshGoldPrices = useCallback(async () => {
             </div>
             <p className="hint-text">
               {riskObs < OBS_RELIABLE
-                ? `⚠ ${riskObs} rendimenti mensili disponibili: volatilità e rapporti sono indicativi finché non se ne accumulano ${OBS_RELIABLE}. Sotto le 12 osservazioni non vengono proprio calcolati — un numero costruito su pochi mesi dipende da quali mesi sono capitati nel campione, non dal portafoglio.`
+                ? `${riskObs} rendimenti mensili disponibili: volatilità e rapporti sono indicativi finché non se ne accumulano ${OBS_RELIABLE}. Sotto le 12 osservazioni non vengono proprio calcolati — un numero costruito su pochi mesi dipende da quali mesi sono capitati nel campione, non dal portafoglio.`
                 : `Campione di ${riskObs} rendimenti mensili. Tasso privo di rischio: ${settings.riskFree ?? 3}% (modificabile in Impostazioni).`}
             </p>
             {concentration.top1 != null && (
@@ -3970,8 +4047,8 @@ const refreshGoldPrices = useCallback(async () => {
 
           {/* ---- Benchmark ---- */}
           <div className="section-card">
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-              <h3 className="section-title" style={{ margin: 0 }}><Target size={16}/> Confronto con un riferimento</h3>
+            <div className="panel-head">
+              <h3 className="section-title"><Target size={16}/> Confronto con un riferimento</h3>
               {!readOnly && (
                 <select className="field-input" style={{ maxWidth: 260, marginTop: 0 }}
                   value={settings.benchmarkKey || ""}
@@ -3986,21 +4063,21 @@ const refreshGoldPrices = useCallback(async () => {
                 <div style={{ height: 260, marginTop: 12 }}>
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={benchSeries} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>
-                      <XAxis dataKey="label" tick={{ fontSize: 11 }}/>
-                      <YAxis tick={{ fontSize: 11 }} domain={["auto", "auto"]} tickFormatter={(v) => v.toFixed(0)}/>
-                      <ReTooltip formatter={(v) => (v == null ? "—" : v.toFixed(1))}/>
-                      <ReferenceLine y={100} stroke="var(--text-muted)" strokeDasharray="4 4"/>
+                      <CartesianGrid {...GRID}/>
+                      <XAxis dataKey="label" {...X_AXIS}/>
+                      <YAxis {...Y_AXIS} domain={["auto", "auto"]} tickFormatter={(v) => v.toFixed(0)} width={44}/>
+                      <ReTooltip formatter={(v) => (v == null ? "—" : v.toFixed(1))} cursor={CURSOR_LINE}/>
+                      <ReferenceLine y={100} stroke="var(--chart-axis)"/>
                       <Line type="monotone" dataKey="portfolio" name="Patrimonio" stroke={seriesColor(0)}
-                        strokeWidth={2.2} dot={false}/>
+                        strokeWidth={2} dot={false} activeDot={ACTIVE_DOT} animationDuration={ANIM_MS}/>
                       <Line type="monotone" dataKey="benchmark" name="Riferimento" stroke={seriesColor(2)}
-                        strokeWidth={2} dot={false} strokeDasharray="5 4" connectNulls/>
+                        strokeWidth={2} dot={false} strokeDasharray="5 4" connectNulls activeDot={ACTIVE_DOT} animationDuration={ANIM_MS}/>
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
-                <div className="chart-legend">
-                  <span><i style={{ background: seriesColor(0) }}/> Patrimonio</span>
-                  <span><i style={{ background: seriesColor(2) }}/> {txNameByKey[settings.benchmarkKey] || "Riferimento"}</span>
+                <div className="chart-legend" style={{ marginTop: 12, marginBottom: 0 }}>
+                  <span className="cl-item"><span className="cl-swatch cl-swatch--line" style={{ background: seriesColor(0) }}/> Patrimonio</span>
+                  <span className="cl-item"><span className="cl-swatch cl-swatch--dash" style={{ borderColor: seriesColor(2) }}/> {txNameByKey[settings.benchmarkKey] || "Riferimento"}</span>
                 </div>
                 <p className="hint-text">
                   Entrambi riportati a 100 sul primo snapshot. Il patrimonio è al netto dei versamenti:
@@ -4029,16 +4106,16 @@ const refreshGoldPrices = useCallback(async () => {
                   <AreaChart data={ddSeries} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
                     <defs>
                       <linearGradient id="gDd" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor={C_LOSS} stopOpacity={0.05}/>
-                        <stop offset="100%" stopColor={C_LOSS} stopOpacity={0.35}/>
+                        <stop offset="0%" stopColor={C_LOSS} stopOpacity={0.04}/>
+                        <stop offset="100%" stopColor={C_LOSS} stopOpacity={0.24}/>
                       </linearGradient>
                     </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>
-                    <XAxis dataKey="label" tick={{ fontSize: 11 }}/>
-                    <YAxis tick={{ fontSize: 11 }} tickFormatter={(v) => `${v}%`}/>
-                    <ReTooltip formatter={(v) => `${v}%`}/>
-                    <ReferenceLine y={0} stroke="var(--border)"/>
-                    <Area type="monotone" dataKey="dd" stroke={C_LOSS} fill="url(#gDd)" strokeWidth={2}/>
+                    <CartesianGrid {...GRID}/>
+                    <XAxis dataKey="label" {...X_AXIS}/>
+                    <YAxis {...Y_AXIS} tickFormatter={(v) => `${v}%`} width={48}/>
+                    <ReTooltip formatter={(v) => `${v}%`} cursor={CURSOR_LINE}/>
+                    <ReferenceLine y={0} stroke="var(--chart-axis)"/>
+                    <Area type="monotone" dataKey="dd" name="Drawdown" stroke={C_LOSS} fill="url(#gDd)" strokeWidth={2} activeDot={ACTIVE_DOT} animationDuration={ANIM_MS}/>
                   </AreaChart>
                 </ResponsiveContainer>
               </div>
@@ -4057,13 +4134,13 @@ const refreshGoldPrices = useCallback(async () => {
               <div style={{ height: Math.max(160, contribByAsset.length * 38) }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={contribByAsset} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 4 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" horizontal={false}/>
-                    <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={(v) => fmt(v, true)}/>
-                    <YAxis type="category" dataKey="key" width={110} tick={{ fontSize: 11 }}
+                    <CartesianGrid {...GRID_V}/>
+                    <XAxis type="number" {...X_AXIS} tickFormatter={(v) => `${axisEuro(v)} €`}/>
+                    <YAxis type="category" dataKey="key" width={140} {...Y_AXIS}
                       tickFormatter={(k) => assetNameMap[k] || k}/>
-                    <ReTooltip formatter={(v) => fmt(v)} labelFormatter={(k) => assetNameMap[k] || k}/>
-                    <ReferenceLine x={0} stroke="var(--border)"/>
-                    <Bar dataKey="gain" radius={[0, 4, 4, 0]}>
+                    <ReTooltip formatter={(v) => [fmt(v), "Contributo"]} labelFormatter={(k) => assetNameMap[k] || k} cursor={CURSOR_BAND}/>
+                    <ReferenceLine x={0} stroke="var(--chart-axis)"/>
+                    <Bar dataKey="gain" radius={[0, 4, 4, 0]} maxBarSize={BAR_MAX} animationDuration={ANIM_MS}>
                       {contribByAsset.map((d) => (
                         <Cell key={d.key} fill={d.gain >= 0 ? C_GAIN : C_LOSS}/>
                       ))}
@@ -4086,13 +4163,13 @@ const refreshGoldPrices = useCallback(async () => {
               <div style={{ height: 240 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <AreaChart data={allocSeries} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="var(--border)"/>
-                    <XAxis dataKey="label" tick={{ fontSize: 11 }}/>
-                    <YAxis tick={{ fontSize: 11 }} domain={[0, 100]} tickFormatter={(v) => `${v}%`}/>
-                    <ReTooltip formatter={(v, k) => [`${v}%`, assetNameMap[k] || k]}/>
+                    <CartesianGrid {...GRID}/>
+                    <XAxis dataKey="label" {...X_AXIS}/>
+                    <YAxis {...Y_AXIS} domain={[0, 100]} tickFormatter={(v) => `${v}%`} width={44}/>
+                    <ReTooltip formatter={(v, k) => [`${v}%`, assetNameMap[k] || k]} cursor={CURSOR_LINE}/>
                     {allIds.map((k, i) => (
                       <Area key={k} type="monotone" dataKey={k} stackId="alloc"
-                        stroke={seriesColor(i)} fill={seriesColor(i)} fillOpacity={0.6}/>
+                        stroke={seriesColor(i)} strokeWidth={1.5} fill={seriesColor(i)} fillOpacity={0.55} animationDuration={ANIM_MS}/>
                     ))}
                   </AreaChart>
                 </ResponsiveContainer>
@@ -4144,7 +4221,7 @@ const refreshGoldPrices = useCallback(async () => {
                               ? `Composto di ${vals.length} mesi su 12: non è un rendimento annuo.`
                               : undefined}>
                             <strong>{yearRet == null ? "—" : `${yearRet > 0 ? "+" : ""}${yearRet.toFixed(1)}%`}</strong>
-                            {parziale && <span className="muted" style={{ fontSize: 10 }}> ({vals.length}m)</span>}
+                            {parziale && <span className="cell-sub"> ({vals.length}m)</span>}
                           </td>
                         </tr>
                       );
@@ -4258,8 +4335,8 @@ const refreshGoldPrices = useCallback(async () => {
               )}
 
               {fiscal.pool.length > 0 && (
-                <div style={{ marginTop: 12 }}>
-                  <h4 style={{ fontSize: 13, margin: "0 0 6px" }}>Zainetto fiscale</h4>
+                <div style={{ marginTop: 20 }}>
+                  <h4 className="sub-head" style={{ marginBottom: 8 }}>Zainetto fiscale</h4>
                   <div className="kpi-mini-row">
                     {fiscal.pool.map((l) => (
                       <span key={l.year}>
@@ -4302,13 +4379,13 @@ const refreshGoldPrices = useCallback(async () => {
   const renderTransactions = () => (
     <div className="tab-content">
       <div className="section-card">
-        <div className="table-controls" style={{ marginBottom: 12 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <h2 className="section-title" style={{ margin: 0 }}>
+        <div className="panel-head">
+          <div className="panel-head__group">
+            <h2 className="section-title">
               <ArrowLeftRight size={16}/> Movimenti
             </h2>
             {transactions.length > 0 && (
-              <span className="muted" style={{ fontSize: 13 }}>{transactions.length} registrati</span>
+              <span className="panel-meta">{transactions.length} registrati</span>
             )}
           </div>
           <div className="btn-row">
@@ -4373,11 +4450,11 @@ const refreshGoldPrices = useCallback(async () => {
                     const flow = txCashFlow(t);
                     return (
                       <tr key={t.id}>
-                        <td className="mono">{t.date}</td>
+                        <td className="mono code">{t.date}</td>
                         <td className="asset-name">
                           {txNameByKey[t.assetKey] || <span className="muted">{t.assetKey}</span>}
                         </td>
-                        <td><span className="class-tag">{TX_LABELS[t.type] || t.type}</span></td>
+                        <td><span className={`class-tag tx-tag tx-${t.type}`}>{TX_LABELS[t.type] || t.type}</span></td>
                         <td className="num mono">{t.type === "dividend" ? "—" : t.quantity}</td>
                         <td className="num mono">{t.type === "dividend" ? "—" : fmt(t.price)}</td>
                         <td className="num mono">{t.fee ? fmt(t.fee) : "—"}</td>
@@ -4388,8 +4465,8 @@ const refreshGoldPrices = useCallback(async () => {
                         <td>
                           {!readOnly && (
                             <div className="row-actions">
-                              <button className="icon-btn" onClick={() => setTxModal(t)}><Edit2 size={14}/></button>
-                              <button className="icon-btn danger"
+                              <button className="icon-btn" onClick={() => setTxModal(t)} title="Modifica" aria-label="Modifica"><Edit2 size={14}/></button>
+                              <button className="icon-btn danger" title="Rimuovi" aria-label="Rimuovi"
                                 onClick={() => { if (window.confirm("Rimuovere questo movimento?")) deleteTx(t.id); }}>
                                 <Trash2 size={14}/>
                               </button>
@@ -4422,44 +4499,53 @@ const refreshGoldPrices = useCallback(async () => {
     setSettings((prev) => ({ ...prev, [key]: val }));
     if (liveSetter) liveSetter(val); // aggiorna anche il controllo live corrispondente
   };
+  // Gli stessi campi di prima, raggruppati per l'area dell'app su cui agiscono.
+  const SETTINGS_GROUPS = [
+    { title: "Portafoglio e ribilanciamento", icon: Target, fields: [
+      { key: "monthlyBudget",       label: "Budget mensile default (€)",    set: setBudget, step: 50,  min: 0 },
+      { key: "rebalanceBand",       label: "Banda ribilanciamento (punti %)", set: null,    step: 0.5, min: 0, max: 25 },
+      { key: "startupSubscription", label: "Abbonamento startup annuo (€)", set: null,      step: 1,   min: 0 },
+    ]},
+    { title: "Proiezione", icon: LineChartIcon, fields: [
+      { key: "projReturn",          label: "Rendimento annuo default (%)",  set: setProjR,  step: 0.5, min: 0, max: 30 },
+      { key: "projMonthly",         label: "Investimento mensile default (€)", set: setProjM, step: 100, min: 0 },
+      { key: "projYears",           label: "Anni proiezione default",       set: setProjY,  step: 1,   min: 1, max: 50 },
+      { key: "inflation",           label: "Inflazione attesa (%)",         set: null,      step: 0.1, min: 0, max: 20 },
+    ]},
+    { title: "Rischio e fisco", icon: Shield, fields: [
+      { key: "riskFree",            label: "Tasso privo di rischio (%)",    set: null,      step: 0.1, min: 0, max: 15 },
+      { key: "taxRate",             label: "Aliquota capital gain (%)",     set: null,      step: 0.5, min: 0, max: 50 },
+      { key: "taxBollo",            label: "Bollo titoli annuo (%)",        set: null,      step: 0.05, min: 0, max: 2 },
+    ]},
+    { title: "Bilancio", icon: PiggyBank, fields: [
+      { key: "emergencyMonths",     label: "Fondo di sicurezza (mesi di spese)", set: null, step: 1, min: 1, max: 24 },
+      { key: "investTargetPct",     label: "Quota entrate da investire (%)", set: null,     step: 1,   min: 0, max: 100 },
+      { key: "expenseBudget",       label: "Tetto di spesa mensile (€)",    set: null,      step: 50,  min: 0 },
+    ]},
+  ];
   const renderSettings = () => (
     <div className="tab-content">
-      <div className="section-card">
-        <h2 className="section-title"><Settings size={16}/> Impostazioni</h2>
-        <p className="welcome-desc" style={{ marginTop: 0 }}>
-          Valori predefiniti personali. Salvati automaticamente sul tuo account.
-        </p>
-        <div className="grid-3" style={{ marginBottom: "1.5rem" }}>
-          {[
-            { key: "startupSubscription", label: "Abbonamento startup annuo (€)", set: null,      step: 1,   min: 0 },
-            { key: "monthlyBudget",       label: "Budget mensile default (€)",    set: setBudget, step: 50,  min: 0 },
-            { key: "projReturn",          label: "Rendimento annuo default (%)",  set: setProjR,  step: 0.5, min: 0, max: 30 },
-            { key: "projMonthly",         label: "Investimento mensile default (€)", set: setProjM, step: 100, min: 0 },
-            { key: "projYears",           label: "Anni proiezione default",       set: setProjY,  step: 1,   min: 1, max: 50 },
-            { key: "inflation",           label: "Inflazione attesa (%)",         set: null,      step: 0.1, min: 0, max: 20 },
-            { key: "riskFree",            label: "Tasso privo di rischio (%)",    set: null,      step: 0.1, min: 0, max: 15 },
-            { key: "rebalanceBand",       label: "Banda ribilanciamento (punti %)", set: null,    step: 0.5, min: 0, max: 25 },
-            { key: "taxRate",             label: "Aliquota capital gain (%)",     set: null,      step: 0.5, min: 0, max: 50 },
-            { key: "taxBollo",            label: "Bollo titoli annuo (%)",        set: null,      step: 0.05, min: 0, max: 2 },
-            { key: "emergencyMonths",     label: "Fondo di sicurezza (mesi di spese)", set: null, step: 1, min: 1, max: 24 },
-            { key: "investTargetPct",     label: "Quota entrate da investire (%)", set: null,     step: 1,   min: 0, max: 100 },
-            { key: "expenseBudget",       label: "Tetto di spesa mensile (€)",    set: null,      step: 50,  min: 0 },
-          ].map(({ key, label, set, step, min, max }) => (
-            <label key={key} className="field-label">
-              {label}
-              <input type="number" value={settings[key] ?? 0}
-                onChange={(e) => setSetting(key, parseFloat(e.target.value) || 0, set)}
-                step={step} min={min} max={max} className="field-input"/>
-            </label>
-          ))}
-        </div>
-        <p style={{ fontSize: 12, color: "var(--text-muted, #888)" }}>
-          Le classi di asset si gestiscono dal pulsante dedicato nella tab Portafoglio.
-          {" "}<strong>Quota entrate da investire</strong> a 0 significa "non impostata":
-          il piano mensile diventa semplicemente quello che avanza dopo le spese.
-          {" "}<strong>Tetto di spesa</strong> a 0 disattiva l'avviso di sforamento.
-        </p>
-      </div>
+      {SETTINGS_GROUPS.map(({ title, icon: Icon, fields }) => (
+        <section key={title} className="section-card settings-group">
+          <h2 className="section-title"><Icon size={16}/> {title}</h2>
+          <div className="form-grid">
+            {fields.map(({ key, label, set, step, min, max }) => (
+              <label key={key} className="field-label">
+                {label}
+                <input type="number" value={settings[key] ?? 0}
+                  onChange={(e) => setSetting(key, parseFloat(e.target.value) || 0, set)}
+                  step={step} min={min} max={max} className="field-input"/>
+              </label>
+            ))}
+          </div>
+        </section>
+      ))}
+      <p className="hint-text" style={{ marginTop: 0 }}>
+        Le classi di asset si gestiscono dal pulsante dedicato nella tab Portafoglio.
+        {" "}<strong>Quota entrate da investire</strong> a 0 significa "non impostata":
+        il piano mensile diventa semplicemente quello che avanza dopo le spese.
+        {" "}<strong>Tetto di spesa</strong> a 0 disattiva l'avviso di sforamento.
+      </p>
     </div>
   );
 
@@ -4468,7 +4554,7 @@ const refreshGoldPrices = useCallback(async () => {
     <div className="tab-content">
       <div className="section-card">
         <h2 className="section-title"><LineChartIcon size={16}/> Proiezione crescita — scenari multipli</h2>
-        <div className="grid-3" style={{ marginBottom: "1.5rem" }}>
+        <div className="form-grid" style={{ marginBottom: 24 }}>
           {[
             { label: "Rendimento annuo base (%)", val: projReturn, set: setProjR, step: 0.5, min: 0, max: 30 },
             { label: "Investimento mensile (€)",  val: projMonthly, set: setProjM, step: 100, min: 0 },
@@ -4483,12 +4569,12 @@ const refreshGoldPrices = useCallback(async () => {
         </div>
 
         {cfTotals.avgInvested > 0 && r2(projMonthly) !== cfTotals.avgInvested && (
-          <p className="hint-text" style={{ marginTop: -8, marginBottom: "1.5rem" }}>
+          <p className="hint-text" style={{ marginTop: -8, marginBottom: 24 }}>
             {/* La proiezione partiva da un numero desiderato. Il bilancio sa
                 quello vero, ed è l'unico che dice dove si finisce davvero. */}
             Nei {cfTotals.months} mesi registrati hai versato in media{" "}
             <strong>{fmt(cfTotals.avgInvested)}</strong> al mese.{" "}
-            <button className="btn btn-ghost" style={{ fontSize: 12, padding: "4px 10px" }}
+            <button className="btn btn-ghost btn-sm" style={{ marginLeft: 8, verticalAlign: "middle" }}
               onClick={() => setProjM(cfTotals.avgInvested)}>
               <PiggyBank size={13}/> Proietta su questo
             </button>
@@ -4496,14 +4582,13 @@ const refreshGoldPrices = useCallback(async () => {
         )}
 
         {/* Fase di prelievo */}
-        <div style={{ marginBottom: "1.5rem" }}>
-          <label className="field-label" style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <input type="checkbox" checked={projWithdraw} onChange={(e) => setProjW(e.target.checked)}
-              style={{ width: 18, height: 18, minHeight: 0 }}/>
+        <div style={{ marginBottom: 24 }}>
+          <label className="field-check">
+            <input type="checkbox" checked={projWithdraw} onChange={(e) => setProjW(e.target.checked)}/>
             Simula la fase di prelievo (si smette di versare e si inizia a ritirare)
           </label>
           {projWithdraw && (
-            <div className="grid-3" style={{ marginTop: 8 }}>
+            <div className="form-grid" style={{ marginTop: 16 }}>
               <label className="field-label">Inizio prelievi (anni da oggi)
                 <input type="number" value={projWithdrawAfter} min={0} max={projYears} step={1}
                   onChange={(e) => setProjWA(parseFloat(e.target.value) || 0)} className="field-input"/>
@@ -4513,14 +4598,13 @@ const refreshGoldPrices = useCallback(async () => {
                   onChange={(e) => setProjWM(parseFloat(e.target.value) || 0)} className="field-input"/>
               </label>
               <label className="field-label">Prelievo annuo
-                <input className="field-input" readOnly value={fmt(projWithdrawMonthly * 12)}
-                  style={{ opacity: 0.6 }}/>
+                <input className="field-input" readOnly value={fmt(projWithdrawMonthly * 12)}/>
               </label>
             </div>
           )}
         </div>
 
-        <div className="grid-4" style={{ marginBottom: "1.5rem" }}>
+        <div className="grid-4" style={{ marginBottom: 24 }}>
           <KpiCard label="Valore iniziale" value={fmt(grandTotal, true)} color="blue"/>
           <KpiCard label={`Proiettato (${projYears}a) — Base`} value={fmt(finalVal, true)} color="green"/>
           <KpiCard label="In potere d'acquisto di oggi"
@@ -4548,11 +4632,11 @@ const refreshGoldPrices = useCallback(async () => {
           <span className="cl-item"><span className="cl-swatch cl-swatch--band" style={{ background: palette[0] }}/>
             Intervallo {Math.max(projReturn - 3, 0)}%–{projReturn + 3}%
           </span>
-          <span className="cl-item"><span className="cl-swatch" style={{ background: palette[0] }}/>
+          <span className="cl-item"><span className="cl-swatch cl-swatch--line" style={{ background: palette[0] }}/>
             Scenario base ({projReturn}%)
           </span>
           {(settings.inflation ?? 0) > 0 && (
-            <span className="cl-item"><span className="cl-swatch" style={{ background: palette[2] }}/>
+            <span className="cl-item"><span className="cl-swatch cl-swatch--dash" style={{ borderColor: palette[2] }}/>
               Potere d'acquisto di oggi
             </span>
           )}
@@ -4560,24 +4644,25 @@ const refreshGoldPrices = useCallback(async () => {
         <div style={{ height: 380 }}>
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={projChartData} margin={{ top: 4, right: 16, left: 0, bottom: 8 }}>
-              <CartesianGrid stroke="var(--border)" vertical={false}/>
-              <XAxis dataKey="year" label={{ value: "Anni", position: "insideBottom", offset: -6 }} tick={{ fontSize: 11 }} stroke="var(--text-muted)"/>
-              <YAxis tickFormatter={(v) => `€${(v/1000).toFixed(0)}k`} tick={{ fontSize: 11 }} stroke="var(--text-muted)" width={60}/>
-              <ReTooltip content={<ProjectionTooltip projReturn={projReturn}/>}/>
+              <CartesianGrid {...GRID}/>
+              <XAxis dataKey="year" {...X_AXIS} label={{ value: "Anni", position: "insideBottom", offset: -4 }}/>
+              <YAxis {...Y_AXIS} tickFormatter={(v) => `${axisEuro(v)} €`} width={64}/>
+              <ReTooltip content={<ProjectionTooltip projReturn={projReturn}/>} cursor={CURSOR_LINE}/>
               <Area type="monotone" dataKey="range" name="Intervallo" stroke="none"
                 fill={palette[0]} fillOpacity={0.16} activeDot={false} isAnimationActive={false}/>
               <Line type="monotone" dataKey="base" name="Scenario base" stroke={palette[0]} strokeWidth={2}
-                dot={false} activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--bg-card)" }}/>
+                dot={false} activeDot={ACTIVE_DOT} animationDuration={ANIM_MS}/>
               {(settings.inflation ?? 0) > 0 && (
                 <Line type="monotone" dataKey="real" name="Potere d'acquisto" stroke={palette[2]}
-                  strokeWidth={2} strokeDasharray="5 4" dot={false}/>
+                  strokeWidth={2} strokeDasharray="5 4" dot={false} animationDuration={ANIM_MS}/>
               )}
             </ComposedChart>
           </ResponsiveContainer>
         </div>
-        <p className="hint-text">
-          ⚠ Proiezione ipotetica a rendimento costante. Non costituisce consulenza finanziaria.
-          {(settings.inflation ?? 0) > 0 && ` La linea tratteggiata è la stessa cifra espressa in euro di oggi, scontata al ${settings.inflation}% annuo: è quella che dice cosa ci si potrà comprare.`}
+        <p className="hint-text is-warn">
+          <AlertTriangle size={15}/>
+          <span>Proiezione ipotetica a rendimento costante. Non costituisce consulenza finanziaria.
+          {(settings.inflation ?? 0) > 0 && ` La linea tratteggiata è la stessa cifra espressa in euro di oggi, scontata al ${settings.inflation}% annuo: è quella che dice cosa ci si potrà comprare.`}</span>
         </p>
       </div>
     </div>
@@ -4599,36 +4684,36 @@ const refreshGoldPrices = useCallback(async () => {
             {/* Budget mensile + split */}
             <div className="section-card">
               <h2 className="section-title"><Target size={16}/> Ribilanciamento — budget mensile</h2>
-              <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: "1.2rem", flexWrap: "wrap" }}>
-                <label className="field-label" style={{ flexDirection: "row", alignItems: "center", gap: 8, margin: 0 }}>
-                  Budget disponibile:
+              <div className="rebal-controls">
+                <label className="field-label field-inline">
+                  Budget disponibile
                   <input type="number" value={monthBudget} onChange={(e) => setBudget(parseFloat(e.target.value) || 0)}
-                    step="100" min="0" className="field-input" style={{ width: 120 }}/>
+                    step="100" min="0" className="field-input" style={{ width: 140 }}/>
                 </label>
                 {investable.available > 0 && r2(monthBudget) !== investable.available && (
-                  <button className="btn btn-ghost" style={{ fontSize: 12, padding: "6px 12px" }}
+                  <button className="btn btn-ghost btn-sm"
                     onClick={() => setBudget(investable.available)}
                     title="Risparmio del mese al netto di quanto manca al fondo di sicurezza">
                     <PiggyBank size={13}/> Usa l'investibile del mese ({fmt(investable.available)})
                   </button>
                 )}
                 {(settings.rebalanceBand ?? 0) > 0 && (
-                  <span className="muted" style={{ fontSize: 13 }}>
+                  <span className="panel-meta">
                     Banda di tolleranza: <strong>{settings.rebalanceBand}</strong> punti — chi è più
                     vicino di così al target non viene toccato.
                   </span>
                 )}
                 {!readOnly && (
-                  <button className="btn btn-primary" style={{ marginLeft: "auto" }}
+                  <button className="btn btn-primary rebal-apply"
                     onClick={applyRebalance} disabled={monthBudget <= 0}>
                     <CheckCircle size={15}/> Segna come eseguito
                   </button>
                 )}
               </div>
 
-              <div className="grid-3" style={{ marginBottom: "1rem" }}>
+              <div className="grid-3" style={{ marginBottom: 16 }}>
                 <KpiCard
-                  label="🥇 Budget target su patrimonio"
+                  label="Budget target su patrimonio"
                   value={fmt(totalItemsBudget)}
                   sub={
                     itemBuys.length > 0
@@ -4638,13 +4723,13 @@ const refreshGoldPrices = useCallback(async () => {
                   color={totalItemsBudget > 0 ? "green" : "blue"}
                 />
                 <KpiCard
-                  label="📈 Budget ETF & Asset"
+                  label="Budget ETF & Asset"
                   value={fmt(etfBudget)}
                   sub={`${etfPortfolioAssets.length} asset`}
                   color="blue"
                 />
                 <KpiCard
-                  label="💼 Totale"
+                  label="Totale"
                   value={fmt(monthBudget)}
                   sub={itemBuys.length === 0
                     ? "Nessun target sul patrimonio → tutto agli ETF"
@@ -4674,9 +4759,9 @@ const refreshGoldPrices = useCallback(async () => {
 
             {/* Livello 1: asset a target sul patrimonio totale */}
             {itemBuys.length > 0 && (
-              <div className="section-card" style={{ borderColor: "rgba(245,158,11,0.4)" }}>
-                <h3 className="section-title" style={{ marginBottom: 4 }}>🥇 Target sul patrimonio totale — Oro & Bitcoin</h3>
-                <p className="hint-text" style={{ marginBottom: 12 }}>
+              <div className="section-card">
+                <h3 className="section-title" style={{ marginBottom: 4 }}><Shield size={16}/> Target sul patrimonio totale — Oro & Bitcoin</h3>
+                <p className="hint-text" style={{ marginTop: 0, marginBottom: 4 }}>
                   Questi asset hanno il target espresso in % del <strong>patrimonio totale</strong> (liquidità + ETF + startup + oro).
                   {goldOnTotal && " Il peso dell'oro considera ETF oro + oro fisico; il budget va solo sull'ETF oro (l'oro fisico è illiquido)."}
                 </p>
@@ -4694,7 +4779,7 @@ const refreshGoldPrices = useCallback(async () => {
                     <tbody>
                       {itemBuys.map((x) => (
                         <tr key={x.id}>
-                          <td className="asset-name">{x.name}{x.kind === "gold" && <span className="muted" style={{ fontSize: 11 }}> (ETF + fisico)</span>}</td>
+                          <td className="asset-name">{x.name}{x.kind === "gold" && <span className="cell-sub"> (ETF + fisico)</span>}</td>
                           <td className="num mono">{x.currentPct.toFixed(2)}%</td>
                           <td className="num mono">{x.targetPct.toFixed(2)}%</td>
                           <td className="num mono pos-text">
@@ -4714,7 +4799,7 @@ const refreshGoldPrices = useCallback(async () => {
             {/* ETF rebalancing */}
             <div className="section-card">
               <h3 className="section-title" style={{ marginBottom: 12 }}>
-                📈 Acquisto ETF & Asset — budget {fmt(etfBudget)}
+                <Briefcase size={16}/> Acquisto ETF & Asset — budget {fmt(etfBudget)}
               </h3>
               <div className="table-wrap">
                 <table className="data-table">
@@ -4732,7 +4817,7 @@ const refreshGoldPrices = useCallback(async () => {
                   <tbody>
                     {etfRebalance.actions.map((x) => (
                       <tr key={x.id}>
-                        <td>{x.name}</td>
+                        <td className="asset-name">{x.name}</td>
                         <td className="num mono">{x.curW.toFixed(2)}%</td>
                         <td className="num mono">{x.tgtW.toFixed(2)}%</td>
                         <td className={`num mono ${x.delta >= 0 ? "pos-text" : "neg-text"}`}>
@@ -4753,7 +4838,7 @@ const refreshGoldPrices = useCallback(async () => {
                           const diff  = r2(Math.abs(total - etfBudget));
                           return (
                             <span className={diff > 0.02 ? "neg-text" : "pos-text"}>
-                              <strong>{fmt(total)}</strong>{diff > 0.02 ? " ⚠" : " ✓"}
+                              <strong>{fmt(total)}</strong>{" "}{diff > 0.02 ? <AlertTriangle size={13} style={{ verticalAlign: -2 }} aria-label="Non torna col budget"/> : <CheckCircle size={13} style={{ verticalAlign: -2 }} aria-label="Torna col budget"/>}
                             </span>
                           );
                         })()}
@@ -4776,137 +4861,201 @@ const refreshGoldPrices = useCallback(async () => {
   };
 
   // ====================== RENDER ======================
+  // Indicatori che scorrono sotto la voce attiva (sidebar, bottom nav, periodo).
+  // Chiamati prima di ogni return condizionale: sono hook.
+  const sideInd   = useSlidingIndicator(tab);
+  const bottomInd = useSlidingIndicator(tab);
+  const periodInd = useSlidingIndicator(`${tab}:${period}`);
+  const mainRef   = useRef(null);
+
+  const currentTab = visibleTabs.find((t) => t.id === tab) || visibleTabs[0];
+  // Una riga sotto il titolo che dice a cosa serve la pagina.
+  const TAB_LEDE = {
+    overview:     "Il patrimonio in un colpo d'occhio: valore, composizione e andamento mese per mese.",
+    budget:       "Entrate e spese di ogni mese, e quanto puoi investire senza intaccare la riserva di liquidità.",
+    portfolio:    "Ogni posizione con prezzo, peso e target: ETF, oro, Bitcoin, startup e liquidità.",
+    transactions: "Acquisti, vendite e dividendi: il registro da cui si ricavano quantità e prezzo medio di carico.",
+    analysis:     "Rendimento, rischio, confronto e fisco, calcolati sullo storico mensile degli snapshot.",
+    projection:   "Dove può arrivare il patrimonio con versamenti e rendimento costanti, e quanto regge ai prelievi.",
+    rebalancing:  "Come dividere il budget del mese per riavvicinare i pesi ai target, senza mai vendere.",
+    settings:     "Valori predefiniti personali, salvati sul tuo account a ogni modifica.",
+  };
+
   // Link condiviso non valido / revocato: pagina d'errore, nessun dato.
   if (shareErr) {
     return (
-      <div className={`app ${dark ? "dark" : "light"}`}>
-        <header className="app-header">
-          <div className="header-left">
-            <div className="logo-mark">PF</div>
-            <h1 className="app-title">Portfolio Tracker</h1>
+      <div className="app app--solo">
+        <main className="solo-main">
+          <div className="brand">
+            <span className="mark" aria-hidden="true">A</span>
+            <span className="brand__name">AssetTracker</span>
           </div>
-        </header>
-        <main className="app-main">
-          <div className="welcome-card">
-            <div className="welcome-icon">🔒</div>
-            <h2 className="welcome-title">Portafoglio non disponibile</h2>
-            <p className="welcome-desc">{shareErr}</p>
-            <a className="btn btn-primary" href="/">Vai al Portfolio Tracker</a>
+          <div className="welcome-card welcome-card--narrow">
+            <div>
+              <div className="welcome-icon"><Lock/></div>
+              <h2 className="welcome-title">Portafoglio non disponibile</h2>
+              <p className="welcome-desc">{shareErr}</p>
+              <a className="btn btn-primary" href="/">Apri AssetTracker</a>
+            </div>
           </div>
         </main>
       </div>
     );
   }
 
+  const savedAt = lastSaved?.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" });
+
   return (
-    <div className={`app ${dark ? "dark" : "light"}`}>
-      <header className="app-header">
-        <div className="header-left">
-          <div className="logo-mark">PF</div>
-          <div>
-            <h1 className="app-title">Portfolio Tracker</h1>
-            <p className="app-subtitle">
-              {/* La parte informativa sparisce su mobile (.subtitle-static),
-                  lo stato di salvataggio qui sotto no. */}
-              <span className="subtitle-static">
-                {readOnly
-                  ? <><Eye size={12}/> Vista condivisa · sola lettura</>
-                  : <><Info size={12}/> Aggiornamento automatico ogni 15 min</>}
-              </span>
-              {!readOnly && lastSaved && !saveErr && (
-                <span style={{ color: "var(--green)" }}>
-                  Salvato {lastSaved.toLocaleTimeString("it-IT", { hour: "2-digit", minute: "2-digit" })}
-                </span>
-              )}
-              {!readOnly && saveErr && (
-                <span style={{ color: "var(--red)" }}>⚠ Non salvato: {saveErr}</span>
-              )}
-              {isLoading && (
-                <span className="loading-dot-row">
-                  <span className="loading-dot"/><span className="loading-dot"/><span className="loading-dot"/>
-                </span>
-              )}
-            </p>
-          </div>
+    <div className={`app ${dark ? "dark" : "light"}${entering ? " app--enter" : ""}`}>
+      {/* Primo elemento raggiungibile col Tab. Un pulsante e non un link: un
+          href="#…" passerebbe dal routing a hash e riporterebbe su Overview. */}
+      <button type="button" className="skip-link" onClick={() => mainRef.current?.focus()}>
+        Vai al contenuto
+      </button>
+
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="mark" aria-hidden="true">A</span>
+          <span className="brand__name">AssetTracker</span>
         </div>
-        <div className="header-right">
-          {grandTotal > 0 && (
-            <div className="grand-total">
-              <span className="gt-label">Patrimonio totale</span>
-              <span className="gt-value">{fmt(grandTotal)}</span>
-              {totals.ret !== 0 && <Badge value={totals.ret * 100}/>}
-            </div>
-          )}
-          {!readOnly && assets.length > 0 && (
-            <button className="btn btn-primary" onClick={fetchAllPrices} disabled={isLoading}>
-              <RefreshCw size={14} className={isLoading ? "spin" : ""}/>
-              {isLoading ? "Aggiornamento…" : "Aggiorna prezzi"}
-            </button>
-          )}
-          {!readOnly && (
-            <button className="btn btn-ghost" onClick={() => setShareModal(true)} title="Condividi in sola lettura">
-              <Share2 size={15}/> Condividi
-            </button>
-          )}
-          <button className="icon-btn theme-toggle" onClick={() => setDark((d) => !d)} title="Cambia tema">
-            {dark ? <Sun size={17}/> : <Moon size={17}/>}
-          </button>
-          {!readOnly && session && supabase && (
-            <button className="icon-btn theme-toggle" title={`Esci (${session.user?.email || ""})`}
-              onClick={() => supabase.auth.signOut()}>
-              <LogOut size={17}/>
-            </button>
-          )}
-        </div>
-      </header>
 
-      {readOnly && (
-        <div className="alert alert-amber mx-4">
-          <Eye size={14}/>
-          <span>
-            Stai visualizzando un portafoglio <strong>condiviso in sola lettura</strong>.
-            Non è possibile aggiungere, modificare o eliminare dati.
-          </span>
-        </div>
-      )}
-
-      {error && (
-        <div className="alert alert-red mx-4">
-          <AlertTriangle size={14}/> {error}
-        </div>
-      )}
-
-      <nav className="tab-bar">
-        {visibleTabs.map((t) => {
-          const Icon = t.icon;
-          return (
-            <button key={t.id} className={`tab-btn ${tab === t.id ? "active" : ""}`} onClick={() => goTab(t.id)}>
-              <Icon size={15}/> {t.label}
-            </button>
-          );
-        })}
-      </nav>
-
-      <main className="app-main">
-        {tab === "overview"    && renderOverview()}
-        {tab === "budget"      && !readOnly && renderBudget()}
-        {tab === "portfolio"   && renderPortfolio()}
-        {tab === "transactions" && !readOnly && renderTransactions()}
-        {tab === "analysis"    && renderAnalysis()}
-        {tab === "projection"  && renderProjection()}
-        {tab === "rebalancing" && renderRebalancing()}
-        {tab === "settings"    && renderSettings()}
-      </main>
-
-      {/* Nav mobile: la .tab-bar è nascosta sotto i 768px (vedi styles.css) */}
-      <nav className="bottom-nav">
-        <div className="bottom-nav-inner">
+        <nav className="side-nav" aria-label="Sezioni" ref={sideInd.containerRef}>
+          <span className="nav-ind" ref={sideInd.indRef} aria-hidden="true"/>
+          <p className="side-nav__label">Sezioni</p>
           {visibleTabs.map((t) => {
             const Icon = t.icon;
+            const on = tab === t.id;
             return (
-              <button key={t.id} className={`bottom-nav-btn ${tab === t.id ? "active" : ""}`}
-                onClick={() => { goTab(t.id); window.scrollTo(0, 0); }} aria-label={t.label}>
-                <Icon size={19}/> <span>{t.short}</span>
+              <button key={t.id} type="button" className={`tab-btn ${on ? "active" : ""}`}
+                onClick={() => goTab(t.id)} aria-current={on ? "page" : undefined} data-tip={t.label}>
+                <Icon/> <span>{t.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+        <div className="sidebar__foot">
+          <button type="button" className="side-action" onClick={() => setDark((d) => !d)}
+            data-tip={dark ? "Tema chiaro" : "Tema scuro"}>
+            {dark ? <Sun/> : <Moon/>}
+            <span className="side-action__text">{dark ? "Tema chiaro" : "Tema scuro"}</span>
+          </button>
+          {!readOnly && session && supabase && (
+            <button type="button" className="side-action" onClick={() => supabase.auth.signOut()}
+              data-tip="Esci">
+              <LogOut/>
+              <span className="side-action__text">
+                Esci
+                <span className="side-action__sub">{session.user?.email || ""}</span>
+              </span>
+            </button>
+          )}
+        </div>
+      </aside>
+
+      <div className="workspace">
+        <header className="topbar">
+          <div className="topbar__lead">
+            <span className="mark" aria-hidden="true">A</span>
+            <div className="topbar__heading">
+              <h1 className="page-title">{currentTab.label}</h1>
+              <div className="topbar__status">
+                {/* La parte informativa sparisce su mobile (.subtitle-static),
+                    lo stato di salvataggio qui sotto no. */}
+                <span className="subtitle-static">
+                  {readOnly
+                    ? <><Eye/> Vista condivisa · sola lettura</>
+                    : <><RefreshCw/> Aggiornamento automatico ogni 15 min</>}
+                </span>
+                {!readOnly && lastSaved && !saveErr && (
+                  <span className="status-ok"><span className="status-dot"/>Salvato {savedAt}</span>
+                )}
+                {!readOnly && saveErr && (
+                  <span className="status-err"><AlertTriangle/>Non salvato: {saveErr}</span>
+                )}
+                {isLoading && (
+                  <span className="status-busy"><span className="spinner" aria-hidden="true"/>Aggiornamento prezzi…</span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="topbar__actions">
+            {grandTotal > 0 && tab !== "overview" && (
+              <div className="grand-total">
+                <span className="gt-label">Patrimonio totale</span>
+                <span className="gt-value">{fmt(grandTotal)}</span>
+                {totals.ret !== 0 && <Badge value={totals.ret * 100}/>}
+              </div>
+            )}
+            {!readOnly && assets.length > 0 && (
+              <button className="btn btn-ghost" onClick={fetchAllPrices} disabled={isLoading} title="Aggiorna i prezzi da JustETF">
+                <RefreshCw size={16} className={isLoading ? "spin" : ""}/>
+                <span className="btn-label">{isLoading ? "Aggiornamento…" : "Aggiorna prezzi"}</span>
+              </button>
+            )}
+            {!readOnly && (
+              <button className="btn btn-ghost" onClick={() => setShareModal(true)} title="Condividi in sola lettura">
+                <Share2 size={16}/> <span className="btn-label">Condividi</span>
+              </button>
+            )}
+            <button className="icon-btn mobile-only" onClick={() => setDark((d) => !d)} title="Cambia tema" aria-label="Cambia tema">
+              {dark ? <Sun size={18}/> : <Moon size={18}/>}
+            </button>
+            {!readOnly && session && supabase && (
+              <button className="icon-btn mobile-only" title={`Esci (${session.user?.email || ""})`}
+                aria-label="Esci" onClick={() => supabase.auth.signOut()}>
+                <LogOut size={18}/>
+              </button>
+            )}
+          </div>
+        </header>
+
+        {(readOnly || error) && (
+          <div className="app-notices">
+            {readOnly && (
+              <div className="alert alert-info">
+                <Eye size={16}/>
+                <span>
+                  Stai visualizzando un portafoglio <strong>condiviso in sola lettura</strong>.
+                  Non è possibile aggiungere, modificare o eliminare dati.
+                </span>
+              </div>
+            )}
+            {error && (
+              <div className="alert alert-red">
+                <AlertTriangle size={16}/> <span>{error}</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        <main className="app-main" ref={mainRef} tabIndex={-1}>
+          <p className="page-lede">{TAB_LEDE[currentTab.id]}</p>
+          {tab === "overview"    && renderOverview()}
+          {tab === "budget"      && !readOnly && renderBudget()}
+          {tab === "portfolio"   && renderPortfolio()}
+          {tab === "transactions" && !readOnly && renderTransactions()}
+          {tab === "analysis"    && renderAnalysis()}
+          {tab === "projection"  && renderProjection()}
+          {tab === "rebalancing" && renderRebalancing()}
+          {tab === "settings"    && renderSettings()}
+        </main>
+      </div>
+
+      {/* Nav del telefono: sotto i 640px la sidebar sparisce (vedi styles.css).
+          Solo icone, il nome è nell'aria-label e nel titolo della pagina. */}
+      <nav className="bottom-nav" aria-label="Sezioni">
+        <div className="bottom-nav-inner" ref={bottomInd.containerRef}>
+          <span className="bottom-ind" ref={bottomInd.indRef} aria-hidden="true"/>
+          {visibleTabs.map((t) => {
+            const Icon = t.icon;
+            const on = tab === t.id;
+            return (
+              <button key={t.id} type="button" className={`bottom-nav-btn ${on ? "active" : ""}`}
+                onClick={() => { goTab(t.id); window.scrollTo(0, 0); }} aria-label={t.label}
+                aria-current={on ? "page" : undefined}>
+                <Icon/>
               </button>
             );
           })}
@@ -4918,8 +5067,9 @@ const refreshGoldPrices = useCallback(async () => {
           agli screen reader senza rubare il fuoco. */}
       {toast && (
         <div className={`toast toast-${toast.type}`} role="status" aria-live="polite">
-          {toast.type === "ok" ? <CheckCircle size={15}/> : <AlertTriangle size={15}/>}
-          <span>{toast.text}</span>
+          {toast.type === "ok" ? <CheckCircle size={16}/> : <AlertTriangle size={16}/>}
+          {/* La spunta testuale è già l'icona: non la si ripete. */}
+          <span>{toast.text.replace(/^✓\s*/, "")}</span>
           <button className="toast-close" onClick={() => setToast(null)} aria-label="Chiudi">
             <X size={14}/>
           </button>
