@@ -25,8 +25,9 @@ import {
 import {
   r2, snapKey, isTotalTargetAsset, calcRebalancingTwoLevel,
   suStatus, calcStartupPortfolio, calcDrift, driftThreshold,
-  startupCashFlows, startupHoldings, calcConcentration,
+  startupCashFlows, startupHoldings, calcConcentration, portfolioBreakdown,
 } from "./rebalance";
+import { downloadXlsx, portfolioSheets, exportFileName } from "./xlsx";
 import {
   TX_TYPES, TX_LABELS, txKey, txCashFlow, holdingFor,
   portfolioRealized, portfolioCashFlows, xirr,
@@ -2313,6 +2314,25 @@ const refreshGoldPrices = useCallback(async () => {
     URL.revokeObjectURL(a.href);
     showToast("ok", "✓ Configurazione esportata");
   }, [storedAssets, startups, totalCash, assetClasses, storedGoldEtf, physGold, transactions, settings, showToast]);
+
+  // ---- Export Excel del portafoglio ----
+  // Tutte le posizioni con le percentuali per macro-categoria e interne. Le
+  // posizioni sono quelle derivate (`assets`/`goldEtf`): con il registro
+  // movimenti la quantità vera è quella, non il campo salvato. I numeri li
+  // calcola portfolioBreakdown (rebalance.js), il file lo scrive xlsx.js.
+  const exportExcel = useCallback(() => {
+    try {
+      const now = new Date();
+      const breakdown = portfolioBreakdown({
+        assets, goldEtf, physGold, startups, totalCash,
+        subscription: settings.startupSubscription ?? 0,
+      });
+      downloadXlsx(exportFileName(now), portfolioSheets(breakdown, { exportedAt: now }));
+      showToast("ok", "✓ Excel del portafoglio esportato");
+    } catch (e) {
+      showToast("err", `Export Excel non riuscito: ${e.message}`);
+    }
+  }, [assets, goldEtf, physGold, startups, totalCash, settings.startupSubscription, showToast]);
 
   const configImportRef = useRef(null);
   const importConfig = useCallback(async (file) => {
@@ -4992,6 +5012,14 @@ const refreshGoldPrices = useCallback(async () => {
               <button className="btn btn-ghost" onClick={fetchAllPrices} disabled={isLoading} title="Aggiorna i prezzi da JustETF">
                 <RefreshCw size={16} className={isLoading ? "spin" : ""}/>
                 <span className="btn-label">{isLoading ? "Aggiornamento…" : "Aggiorna prezzi"}</span>
+              </button>
+            )}
+            {/* Anche nella vista condivisa: esporta solo ciò che è già a schermo
+                (movimenti e bilancio non arrivano al client pubblico). */}
+            {!isEmpty && (
+              <button className="btn btn-ghost" onClick={exportExcel}
+                title="Scarica un file Excel con tutte le posizioni e le percentuali per categoria">
+                <Download size={16}/> <span className="btn-label">Esporta Excel</span>
               </button>
             )}
             {!readOnly && (

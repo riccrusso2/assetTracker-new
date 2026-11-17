@@ -3,6 +3,7 @@ import {
   calcStartupMetrics, calcStartupPortfolio,
   calcDrift, driftThreshold, DRIFT_ALERT_PP,
   startupCashFlows, startupHoldings, calcConcentration,
+  portfolioBreakdown, TARGET_BASE,
 } from "./rebalance";
 import { xirr } from "./transactions";
 
@@ -474,5 +475,158 @@ describe("calcConcentration", () => {
     expect(calcConcentration([{ name: "a", value: 10 }], 0).top1).toBeNull();
     // Le posizioni a zero o non numeriche non contano.
     expect(calcConcentration([{ name: "a", value: 0 }, { name: "b" }], 100).top1).toBeNull();
+  });
+});
+
+// ====================== composizione del patrimonio (export) ======================
+
+describe("portfolioBreakdown", () => {
+  // Il portafoglio dell'esempio reale: ETF 35.970,72 · Crypto 1.283,16 ·
+  // Startup 4.500 · Oro 7.005,69 · Liquidità 10.670 → 60,5 / 2,2 / 7,6 / 11,8 / 18,0 %.
+  const REAL = {
+    assets: [
+      { id: "a1", name: "FTSE All-World", identifier: "IE00BK5BQT80", quantity: 150, costBasis: 120,
+        lastPrice: 140, targetWeight: 60, assetClass: "ETF" },
+      { id: "a2", name: "Bitcoin ETP", identifier: "GB00BJYDH287", quantity: 2, costBasis: 700,
+        lastPrice: 641.58, targetWeight: 2, assetClass: "Crypto" },
+      { id: "a3", name: "MSCI World", identifier: "IE00B4L5Y983", quantity: 120, costBasis: 95,
+        lastPrice: 100.5, targetWeight: 30, assetClass: "ETF" },
+      { id: "a4", name: "EM IMI", identifier: "IE00BKM4GZ66", quantity: 80, costBasis: 30,
+        lastPrice: 36.384, targetWeight: 10, assetClass: "ETF" },
+    ],
+    goldEtf: { id: "gold-etf", name: "Physical Gold", identifier: "IE00B4ND3602", quantity: 25,
+               costBasis: 180, lastPrice: 200.5, targetWeight: 10, assetClass: "Oro" },
+    physGold: { grams: 10, pricePerGram18kt: 199.319 },
+    startups: [
+      { id: "s1", name: "Alfa", invested: 3000, fee: 60, date: "2023-05-10" },
+      { id: "s2", name: "Beta", invested: 1000, fee: 20, currentValue: 1500 },
+      { id: "s3", name: "Gamma", invested: 500, fee: 10, status: "failed" },
+    ],
+    totalCash: 10670,
+  };
+
+  test("macro-categorie nell'ordine e con le percentuali della Overview", () => {
+    const b = portfolioBreakdown(REAL);
+    expect(b.grandTotal).toBeCloseTo(59429.57, 2);
+    expect(b.categories.map((c) => c.name)).toEqual(["ETF", "Crypto", "Startup", "Oro", "Liquidità"]);
+    expect(b.categories.map((c) => r2(c.value))).toEqual([35970.72, 1283.16, 4500, 7005.69, 10670]);
+    expect(b.categories.map((c) => c.pct.toFixed(1))).toEqual(["60.5", "2.2", "7.6", "11.8", "18.0"]);
+    // Valori non arrotondati: le categorie sommano esattamente al patrimonio.
+    expect(b.categories.reduce((s, c) => s + c.value, 0)).toBeCloseTo(b.grandTotal, 9);
+    expect(b.categories.reduce((s, c) => s + c.pct, 0)).toBeCloseTo(100, 9);
+  });
+
+  test("ogni ETF ha ISIN, peso nella categoria, peso attuale e target sulla stessa base", () => {
+    const etf = portfolioBreakdown(REAL).categories.find((c) => c.name === "ETF");
+    expect(etf.items.map((p) => p.isin)).toEqual(["IE00BK5BQT80", "IE00B4L5Y983", "IE00BKM4GZ66"]);
+    expect(etf.items.reduce((s, p) => s + p.pctCategory, 0)).toBeCloseTo(100, 9);
+    const ftse = etf.items[0];
+    expect(ftse.value).toBeCloseTo(21000, 6);
+    expect(ftse.pctCategory).toBeCloseTo((21000 / 35970.72) * 100, 6);
+    expect(ftse.pctTotal).toBeCloseTo((21000 / 59429.57) * 100, 6);
+    // Il sotto-portafoglio ETF coincide qui con la categoria ETF.
+    expect(ftse.weight).toBeCloseTo(ftse.pctCategory, 9);
+    expect(ftse.target).toBe(60);
+    expect(ftse.targetBase).toBe(TARGET_BASE.etf);
+    expect(ftse.drift).toBeCloseTo(ftse.weight - 60, 9);
+    expect(ftse.pnl).toBeCloseTo(3000, 6);
+    expect(ftse.pnlPct).toBeCloseTo(16.6667, 3);
+  });
+
+  test("crypto e oro hanno il target sul patrimonio; l'oro conta ETF + fisico", () => {
+    const b = portfolioBreakdown(REAL);
+    const btc = b.categories.find((c) => c.name === "Crypto").items[0];
+    expect(btc.targetBase).toBe(TARGET_BASE.total);
+    expect(btc.weight).toBeCloseTo(btc.pctTotal, 9);
+    expect(btc.target).toBe(2);
+
+    const oro = b.categories.find((c) => c.name === "Oro");
+    expect(oro.items.map((p) => p.kind)).toEqual(["goldEtf", "physGold"]);
+    const [etf, fisico] = oro.items;
+    expect(etf.isin).toBe("IE00B4ND3602");
+    expect(etf.value).toBeCloseTo(5012.5, 6);
+    expect(fisico.value).toBe(1993.19);
+    expect(fisico.quantity).toBe(10);
+    expect(etf.pctCategory + fisico.pctCategory).toBeCloseTo(100, 9);
+    // Il peso confrontato col target è quello della UI: (ETF + fisico) / patrimonio.
+    expect(etf.weight).toBeCloseTo(oro.pct, 9);
+    expect(etf.target).toBe(10);
+    expect(etf.targetBase).toBe(TARGET_BASE.gold);
+    expect(fisico.target).toBeNull();
+  });
+
+  test("nel patrimonio solo le startup attive; P&L solo dove c'è una valutazione", () => {
+    const b = portfolioBreakdown(REAL);
+    const su = b.categories.find((c) => c.name === "Startup");
+    expect(su.items.map((p) => p.name)).toEqual(["Alfa", "Beta"]);
+    expect(su.items[0].value).toBe(3000);
+    expect(su.items[0].pnl).toBeNull();         // al costo: niente P&L inventato
+    expect(su.items[1].value).toBe(1500);
+    expect(su.items[1].pnl).toBe(480);          // 1500 − (1000 + 20)
+    expect(su.items[0].target).toBeNull();
+    // La fallita resta nel riepilogo startup per il foglio dedicato.
+    expect(b.startups.closed.map((s) => s.name)).toEqual(["Gamma"]);
+  });
+
+  test("target ETF che non sommano a 100 sono normalizzati come nel ribilanciamento", () => {
+    const b = portfolioBreakdown({
+      assets: [
+        { name: "A", quantity: 6, lastPrice: 100, targetWeight: 48, assetClass: "ETF" },
+        { name: "B", quantity: 4, lastPrice: 100, targetWeight: 32, assetClass: "ETF" },
+      ],
+    });
+    expect(b.etfTargetSum).toBe(80);
+    const [a, bb] = b.categories[0].items;
+    expect([a.target, bb.target]).toEqual([60, 40]);
+    // Posizioni esattamente 60/40: a target, nessuno scostamento.
+    expect(a.drift).toBeCloseTo(0, 9);
+    expect(bb.drift).toBeCloseTo(0, 9);
+  });
+
+  test("ETF oro col target sul sotto-portafoglio ETF: il fisico resta fuori dalla base", () => {
+    const b = portfolioBreakdown({
+      assets: [{ name: "Globale", quantity: 90, lastPrice: 100, targetWeight: 90, assetClass: "ETF" }],
+      goldEtf: { name: "Oro ETF", identifier: "IE00B4ND3602", quantity: 10, lastPrice: 100,
+                 targetWeight: 10, assetClass: "Oro", targetOnTotal: false },
+      physGold: { grams: 100, pricePerGram18kt: 50 },
+      totalCash: 5000,
+    });
+    expect(b.goldOnTotal).toBe(false);
+    expect(b.etfSubTotal).toBe(10000);
+    const [etfOro] = b.categories.find((c) => c.name === "Oro").items;
+    expect(etfOro.weight).toBeCloseTo(10, 9);
+    expect(etfOro.target).toBe(10);
+    expect(etfOro.targetBase).toBe(TARGET_BASE.etf);
+    const globale = b.categories.find((c) => c.name === "ETF").items[0];
+    expect(globale.weight).toBeCloseTo(90, 9);     // 9000 / 10000, non sul patrimonio
+  });
+
+  test("esporta anche gli asset a zero, senza alterare l'ordine delle categorie", () => {
+    const b = portfolioBreakdown({
+      assets: [
+        { name: "Tracker", quantity: 0, lastPrice: 50, assetClass: "Bond" },
+        { name: "Senza prezzo", quantity: 3, lastPrice: null, assetClass: "ETF" },
+        { name: "Globale", quantity: 1, lastPrice: 100, assetClass: "ETF" },
+      ],
+    });
+    expect(b.categories.map((c) => c.name)).toEqual(["ETF", "Bond"]);
+    expect(b.categories[0].items.map((p) => p.name)).toEqual(["Senza prezzo", "Globale"]);
+    expect(b.categories[1].value).toBe(0);
+    expect(b.categories[1].items[0].pctCategory).toBeNull();   // 0 su 0 non è 0%
+  });
+
+  test("portafoglio vuoto: nessuna categoria e nessuna percentuale inventata", () => {
+    const b = portfolioBreakdown({});
+    expect(b.grandTotal).toBe(0);
+    expect(b.categories).toEqual([]);
+  });
+
+  test("la liquidità negativa resta, altrimenti le categorie non sommano al totale", () => {
+    const b = portfolioBreakdown({
+      assets: [{ name: "Globale", quantity: 10, lastPrice: 100, assetClass: "ETF" }],
+      totalCash: -200,
+    });
+    expect(b.grandTotal).toBe(800);
+    expect(b.categories.map((c) => c.pct)).toEqual([125, -25]);
   });
 });
