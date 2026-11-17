@@ -339,3 +339,152 @@ export const startupHoldings = (startups, asOf) => {
     oldest: oldest ? { name: oldest.name, years: r2(years(oldest)) } : null,
   };
 };
+
+// ====================== COMPOSIZIONE DEL PATRIMONIO ======================
+// Scomposizione a due livelli per l'export Excel: le macro-categorie della
+// Overview ("Asset allocation": classi degli asset quotati, poi Startup, Oro,
+// Liquidità) e, dentro ognuna, le singole posizioni.
+//
+// Ogni posizione porta tre percentuali che rispondono a domande diverse:
+//  - `pctCategory`: quanto pesa dentro la sua macro-categoria;
+//  - `pctTotal`:    quanto pesa sul patrimonio;
+//  - `weight` contro `target`: il peso misurato sulla STESSA base del target,
+//    cioè il "Peso" delle tabelle del Portafoglio. Per gli ETF è il
+//    sotto-portafoglio ETF (target normalizzato a 100 come nel
+//    ribilanciamento), per oro e crypto il patrimonio totale. Senza questa
+//    colonna il confronto col target sarebbe fra numeri con denominatori
+//    diversi.
+//
+// Le basi replicano quelle di App.js (grandTotal, etfSubTotal, goldPct): se
+// cambiano lì, vanno cambiate qui, altrimenti il file dice un numero diverso
+// da quello a schermo. I valori restano non arrotondati: l'arrotondamento è
+// del formato di cella, così la somma delle righe torna esattamente al totale.
+export const TARGET_BASE = {
+  etf:   "Sotto-portafoglio ETF",
+  total: "Patrimonio totale",
+  gold:  "Patrimonio totale (ETF + oro fisico)",
+};
+
+export const portfolioBreakdown = ({
+  assets = [], goldEtf = null, physGold = null, startups = [], totalCash = 0, subscription = 0,
+} = {}) => {
+  const valOf = (a) => (a && a.lastPrice ? a.lastPrice * (a.quantity || 0) : 0);
+  const pct   = (v, base) => (base > 0 ? (v / base) * 100 : null);
+  const list  = assets || [];
+  const gold  = goldEtf || {};
+
+  // ---- Basi, come in App.js ----
+  const goldOnTotal   = isTotalTargetAsset(gold);
+  const goldEtfValue  = valOf(gold);
+  const physGoldValue = physGold?.pricePerGram18kt && physGold?.grams
+    ? r2(physGold.pricePerGram18kt * physGold.grams) : 0;
+  const su   = calcStartupPortfolio(startups, subscription);
+  const cash = Number(totalCash) || 0;
+  const grandTotal = list.reduce((s, a) => s + valOf(a), 0) + goldEtfValue
+    + cash + physGoldValue + su.activeValue;
+
+  // L'ETF oro entra nel sotto-portafoglio solo col target ETF-relative.
+  const etfPortfolio = list.filter((a) => !isTotalTargetAsset(a));
+  if (!goldOnTotal && gold.identifier) etfPortfolio.push(gold);
+  const etfSubTotal  = etfPortfolio.reduce((s, a) => s + valOf(a), 0);
+  const etfTargetSum = r2(etfPortfolio.reduce((s, a) => s + (a.targetWeight || 0), 0));
+  const etfNorm      = etfTargetSum > 0 ? 100 / etfTargetSum : 1;
+
+  const noTarget = { weight: null, target: null, targetBase: null };
+  const quoted = (a, kind = "asset") => {
+    const value   = valOf(a);
+    const qty     = a.quantity || 0;
+    const hasPerf = !!(a.costBasis && a.lastPrice);
+    const tgt = isTotalTargetAsset(a)
+      ? { weight: pct(value, grandTotal), target: a.targetWeight || 0, targetBase: TARGET_BASE.total }
+      : { weight: pct(value, etfSubTotal), target: r2((a.targetWeight || 0) * etfNorm), targetBase: TARGET_BASE.etf };
+    return {
+      kind, name: a.name || "", isin: a.identifier || "", assetClass: a.assetClass || "",
+      quantity: qty, unitCost: a.costBasis || null, price: a.lastPrice || null,
+      value, cost: a.costBasis ? a.costBasis * qty : null,
+      pnl:    hasPerf ? (a.lastPrice - a.costBasis) * qty : null,
+      pnlPct: hasPerf ? ((a.lastPrice - a.costBasis) / a.costBasis) * 100 : null,
+      ...tgt,
+    };
+  };
+
+  // ---- Macro-categorie, nell'ordine della Overview ----
+  // Le classi entrano per prima comparsa con valore (come calcClassDist), poi
+  // quelle dei soli asset ancora a zero, che si esportano comunque: sono nel
+  // portafoglio anche senza prezzo o con quantità 0 (tracker di benchmark).
+  const cats = new Map();
+  const add  = (name, pos) => {
+    if (!cats.has(name)) cats.set(name, []);
+    cats.get(name).push(pos);
+  };
+  const classOf = (a) => a.assetClass || "Altro";
+  [...list.filter((a) => valOf(a) > 0), ...list].forEach((a) => {
+    if (!cats.has(classOf(a))) cats.set(classOf(a), []);
+  });
+  list.forEach((a) => add(classOf(a), quoted(a)));
+
+  // Solo le attive sono nel patrimonio; le concluse restano in `startups`.
+  su.active.forEach((s) => {
+    // Senza valutazione dichiarata il valore è il costo e il P&L non esiste:
+    // la UI mostra "—", e un −commissioni qui sarebbe un numero inventato.
+    const valued = s.currentValue != null;
+    add("Startup", {
+      kind: "startup", name: s.name || "", isin: "", assetClass: "Startup",
+      quantity: null, unitCost: null, price: null,
+      value: s.value, cost: s.totalCost,
+      pnl:    valued ? s.unrealPnl : null,
+      pnlPct: valued ? s.unrealRoiPct : null,
+      date: s.date || null, ...noTarget,
+    });
+  });
+
+  // Oro: ETF quotato e fisico nella stessa categoria, come nella Overview. Se
+  // il target dell'oro è sul patrimonio vale per ETF + fisico insieme, e così
+  // lo misura la UI (goldPct).
+  if (gold.identifier || goldEtfValue > 0) {
+    const g = quoted({ ...gold, name: gold.name || "ETF oro" }, "goldEtf");
+    if (goldOnTotal) {
+      Object.assign(g, {
+        weight: pct(goldEtfValue + physGoldValue, grandTotal),
+        target: gold.targetWeight || 0,
+        targetBase: TARGET_BASE.gold,
+      });
+    }
+    add("Oro", g);
+  }
+  if ((physGold?.grams || 0) > 0) {
+    add("Oro", {
+      kind: "physGold", name: "Oro fisico 18kt", isin: "", assetClass: "Oro",
+      quantity: physGold.grams, unit: "g", unitCost: null, price: physGold.pricePerGram18kt || null,
+      value: physGoldValue, cost: null, pnl: null, pnlPct: null, ...noTarget,
+    });
+  }
+
+  // Anche negativa: il patrimonio la conta, e senza la riga le categorie non
+  // sommerebbero al totale.
+  if (cash !== 0) {
+    add("Liquidità", {
+      kind: "cash", name: "Liquidità disponibile", isin: "", assetClass: "Liquidità",
+      quantity: null, unitCost: null, price: null,
+      value: cash, cost: null, pnl: null, pnlPct: null, ...noTarget,
+    });
+  }
+
+  const categories = [...cats]
+    .filter(([, items]) => items.length > 0)
+    .map(([name, items]) => {
+      const value = items.reduce((s, p) => s + p.value, 0);
+      return {
+        name, value, pct: pct(value, grandTotal),
+        items: items.map((p) => ({
+          ...p,
+          category: name,
+          pctCategory: value !== 0 ? (p.value / value) * 100 : null,
+          pctTotal: pct(p.value, grandTotal),
+          drift: p.weight != null && p.target != null ? p.weight - p.target : null,
+        })),
+      };
+    });
+
+  return { grandTotal, categories, etfSubTotal, etfTargetSum, goldOnTotal, startups: su };
+};

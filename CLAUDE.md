@@ -70,6 +70,7 @@ On the client, `AuthGate` matches the `/p/<token>` pathname *before* the session
 - `calcRebalancingTwoLevel` — level 1 funds the total-target items, level 2 sends the leftover budget to `calcRebalancing`, which distributes proportionally to normalized targets, **buy-only, never sells**, with a rounding-remainder fixup so the buys sum exactly to the budget.
 - `calcRebalancing(assets, totalVal, budget, band)` — `band` is the tolerance in percentage points below target under which an asset is left alone. With `band > 0` the leftover budget goes only to out-of-band assets; with `band = 0` (default) behaviour is unchanged. Deltas are measured against the *current* total, not total+budget — see the `ponytail:` note there before changing it.
 - Startups have a lifecycle (`active` / `exit` / `failed`); configs written before the field existed count as active.
+- `portfolioBreakdown` feeds the Excel export (topbar → "Esporta Excel"): macro-categories in Overview order, each position with % of its category, % of net worth, and weight vs target on the target's own base. It **replicates** App.js's bases (`grandTotal`, `etfSubTotal`, `goldPct`) — change them in both places; `src/App.export.test.js` compares the file against the on-screen allocation. [src/xlsx.js](src/xlsx.js) is a dependency-free .xlsx writer (stored zip + SpreadsheetML) plus the sheet layout, no financial logic.
 
 #### [src/transactions.js](src/transactions.js) — the movement register
 

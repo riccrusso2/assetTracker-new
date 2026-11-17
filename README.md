@@ -61,6 +61,7 @@ Per ripristinare, usa i rispettivi pulsanti **Importa**.
 | 🔮 **Proiezione** | Simulazione scenari pessimistico/base/ottimistico |
 | 🛡️ **Metriche rischio** | CAGR, Volatilità, Max Drawdown, Sharpe, Sortino |
 | 🏷️ **Asset class custom** | Crea, rinomina e cancella le categorie liberamente |
+| 📊 **Export Excel** | Tutte le posizioni in un `.xlsx`: macro-categorie con % sul patrimonio, posizioni con ISIN, % nella categoria, peso attuale e target, foglio startup |
 | 💾 **Backup/Restore** | Esporta e importa tutta la configurazione in JSON |
 | 🌙 **Dark/Light mode** | Tema scuro e chiaro |
 
